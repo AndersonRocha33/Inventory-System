@@ -10,6 +10,10 @@ async function listPositions(req, res) {
         codigo,
         status,
         operador_atual,
+        primeiro_operador,
+        segundo_operador,
+        terceiro_operador,
+        fase_atual,
         data_inicio,
         data_fim
       FROM posicoes
@@ -37,16 +41,45 @@ async function startCounting(req, res) {
       return res.status(400).json({ error: "Operador é obrigatório" })
     }
 
+    const positionResult = await pool.query(
+      `SELECT id, status, fase_atual
+       FROM posicoes
+       WHERE id = $1`,
+      [positionId]
+    )
+
+    if (positionResult.rowCount === 0) {
+      return res.status(404).json({ error: "Posição não encontrada" })
+    }
+
+    const position = positionResult.rows[0]
+    const faseAtual = Number(position.fase_atual || 1)
+    const nomeOperador = operador.trim()
+
+    let campoOperador = "primeiro_operador"
+    if (faseAtual === 2) campoOperador = "segundo_operador"
+    if (faseAtual === 3) campoOperador = "terceiro_operador"
+
     const result = await pool.query(
       `UPDATE posicoes
        SET
          status = 'contando',
          operador_atual = $1,
-         data_inicio = NOW()
+         data_inicio = NOW(),
+         ${campoOperador} = COALESCE(${campoOperador}, $1)
        WHERE id = $2
          AND status IN ('pendente', 'recontagem')
-       RETURNING id, codigo, status, operador_atual, data_inicio`,
-      [operador.trim(), positionId]
+       RETURNING
+         id,
+         codigo,
+         status,
+         operador_atual,
+         primeiro_operador,
+         segundo_operador,
+         terceiro_operador,
+         fase_atual,
+         data_inicio`,
+      [nomeOperador, positionId]
     )
 
     if (result.rowCount === 0) {
@@ -77,7 +110,15 @@ async function finishCounting(req, res) {
     await client.query("BEGIN")
 
     const positionResult = await client.query(
-      `SELECT id, codigo, status, operador_atual
+      `SELECT
+        id,
+        codigo,
+        status,
+        operador_atual,
+        fase_atual,
+        primeiro_operador,
+        segundo_operador,
+        terceiro_operador
        FROM posicoes
        WHERE id = $1`,
       [positionId]
@@ -89,6 +130,7 @@ async function finishCounting(req, res) {
     }
 
     const position = positionResult.rows[0]
+    const faseAtual = Number(position.fase_atual || 1)
 
     const divergenceResult = await client.query(
       `SELECT
@@ -101,12 +143,13 @@ async function finishCounting(req, res) {
           SELECT c.quantidade_contada
           FROM contagens c
           WHERE c.item_id = i.id
+            AND c.fase = $2
           ORDER BY c.data_contagem DESC
           LIMIT 1
         ), 0) AS quantidade_contada
       FROM itens i
       WHERE i.posicao_id = $1`,
-      [positionId]
+      [positionId, faseAtual]
     )
 
     const divergencias = divergenceResult.rows.filter((item) => {
@@ -117,26 +160,57 @@ async function finishCounting(req, res) {
       return sistema !== contado
     })
 
-    const novoStatus = divergencias.length > 0 ? "recontagem" : "finalizado"
+    let novoStatus = "finalizado"
+    let novaFase = faseAtual
+
+    if (divergencias.length > 0) {
+      if (faseAtual < 3) {
+        novoStatus = "recontagem"
+        novaFase = faseAtual + 1
+      } else {
+        novoStatus = "finalizado"
+        novaFase = faseAtual
+      }
+    }
 
     const updateResult = await client.query(
       `UPDATE posicoes
        SET
          status = $1,
-         data_fim = NOW()
-       WHERE id = $2
-       RETURNING id, codigo, status, operador_atual, data_inicio, data_fim`,
-      [novoStatus, positionId]
+         fase_atual = $2,
+         data_fim = NOW(),
+         operador_atual = NULL
+       WHERE id = $3
+       RETURNING
+         id,
+         codigo,
+         status,
+         operador_atual,
+         primeiro_operador,
+         segundo_operador,
+         terceiro_operador,
+         fase_atual,
+         data_inicio,
+         data_fim`,
+      [novoStatus, novaFase, positionId]
     )
 
     await client.query("COMMIT")
 
+    let message = "Posição finalizada sem divergências"
+
+    if (divergencias.length > 0 && faseAtual === 1) {
+      message = "Posição enviada para primeira recontagem"
+    } else if (divergencias.length > 0 && faseAtual === 2) {
+      message = "Posição enviada para segunda recontagem"
+    } else if (divergencias.length > 0 && faseAtual === 3) {
+      message = "Posição finalizada após segunda recontagem, ainda com divergências"
+    }
+
     return res.json({
-      message:
-        novoStatus === "finalizado"
-          ? "Posição finalizada sem divergências"
-          : "Posição enviada para recontagem",
+      message,
       position: updateResult.rows[0],
+      faseAnalisada: faseAtual,
       totalDivergencias: divergencias.length,
       divergencias
     })

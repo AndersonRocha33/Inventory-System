@@ -32,6 +32,24 @@ async function listDivergentItemsByPosition(req, res) {
   try {
     const { positionId } = req.params
 
+    const positionResult = await pool.query(
+      `SELECT fase_atual
+       FROM posicoes
+       WHERE id = $1`,
+      [positionId]
+    )
+
+    if (positionResult.rowCount === 0) {
+      return res.status(404).json({ error: "Posição não encontrada" })
+    }
+
+    const faseAtual = Number(positionResult.rows[0].fase_atual || 1)
+    const faseAnterior = faseAtual - 1
+
+    if (faseAnterior < 1) {
+      return res.json([])
+    }
+
     const result = await pool.query(
       `SELECT
         i.id,
@@ -45,12 +63,13 @@ async function listDivergentItemsByPosition(req, res) {
           SELECT c.quantidade_contada
           FROM contagens c
           WHERE c.item_id = i.id
+            AND c.fase = $2
           ORDER BY c.data_contagem DESC
           LIMIT 1
         ), 0) AS quantidade_contada
       FROM itens i
       WHERE i.posicao_id = $1`,
-      [positionId]
+      [positionId, faseAnterior]
     )
 
     const divergentes = result.rows.filter((item) => {
@@ -85,9 +104,13 @@ async function registerCount(req, res) {
     }
 
     const itemResult = await pool.query(
-      `SELECT id, posicao_id
-       FROM itens
-       WHERE id = $1`,
+      `SELECT
+        i.id,
+        i.posicao_id,
+        p.fase_atual
+       FROM itens i
+       JOIN posicoes p ON p.id = i.posicao_id
+       WHERE i.id = $1`,
       [itemId]
     )
 
@@ -96,6 +119,7 @@ async function registerCount(req, res) {
     }
 
     const item = itemResult.rows[0]
+    const faseAtual = Number(item.fase_atual || 1)
 
     const result = await pool.query(
       `INSERT INTO contagens (
@@ -103,15 +127,17 @@ async function registerCount(req, res) {
         posicao_id,
         operador,
         quantidade_contada,
-        tipo
-      ) VALUES ($1, $2, $3, $4, $5)
+        tipo,
+        fase
+      ) VALUES ($1, $2, $3, $4, $5, $6)
       RETURNING *`,
       [
         item.id,
         item.posicao_id,
         operador.trim(),
         Number(quantidade),
-        tipo || "primeira_contagem"
+        tipo || `fase_${faseAtual}`,
+        faseAtual
       ]
     )
 
@@ -139,6 +165,19 @@ async function addExtraItem(req, res) {
       })
     }
 
+    const positionResult = await pool.query(
+      `SELECT fase_atual
+       FROM posicoes
+       WHERE id = $1`,
+      [positionId]
+    )
+
+    if (positionResult.rowCount === 0) {
+      return res.status(404).json({ error: "Posição não encontrada" })
+    }
+
+    const faseAtual = Number(positionResult.rows[0].fase_atual || 1)
+
     const itemResult = await pool.query(
       `INSERT INTO itens (
         posicao_id,
@@ -159,14 +198,16 @@ async function addExtraItem(req, res) {
         posicao_id,
         operador,
         quantidade_contada,
-        tipo
-      ) VALUES ($1, $2, $3, $4, $5)`,
+        tipo,
+        fase
+      ) VALUES ($1, $2, $3, $4, $5, $6)`,
       [
         item.id,
         positionId,
         operador?.trim() || "Operador não informado",
         Number(quantidade),
-        "item_a_mais"
+        "item_a_mais",
+        faseAtual
       ]
     )
 
