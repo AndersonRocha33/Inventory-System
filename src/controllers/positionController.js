@@ -1,4 +1,5 @@
 const pool = require("../db/db")
+const { resolveItem } = require("../services/countResolutionService")
 
 async function listPositions(req, res) {
   try {
@@ -132,7 +133,7 @@ async function finishCounting(req, res) {
     const position = positionResult.rows[0]
     const faseAtual = Number(position.fase_atual || 1)
 
-    const divergenceResult = await client.query(
+    const itemsResult = await client.query(
       `SELECT
         i.id AS item_id,
         i.sku,
@@ -142,35 +143,76 @@ async function finishCounting(req, res) {
         COALESCE((
           SELECT c.quantidade_contada
           FROM contagens c
-          WHERE c.item_id = i.id
-            AND c.fase = $2
+          WHERE c.item_id = i.id AND c.fase = 1
           ORDER BY c.data_contagem DESC
           LIMIT 1
-        ), 0) AS quantidade_contada
+        ), NULL) AS q1,
+        COALESCE((
+          SELECT c.quantidade_contada
+          FROM contagens c
+          WHERE c.item_id = i.id AND c.fase = 2
+          ORDER BY c.data_contagem DESC
+          LIMIT 1
+        ), NULL) AS q2,
+        COALESCE((
+          SELECT c.quantidade_contada
+          FROM contagens c
+          WHERE c.item_id = i.id AND c.fase = 3
+          ORDER BY c.data_contagem DESC
+          LIMIT 1
+        ), NULL) AS q3
       FROM itens i
       WHERE i.posicao_id = $1`,
-      [positionId, faseAtual]
+      [positionId]
     )
 
-    const divergencias = divergenceResult.rows.filter((item) => {
-      const sistema = Number(item.quantidade_sistema || 0)
-      const contado = Number(item.quantidade_contada || 0)
+    const unresolvedItems = []
+    const analyzedItems = []
 
-      if (item.encontrado_a_mais) return true
-      return sistema !== contado
-    })
+    for (const item of itemsResult.rows) {
+      const resolution = resolveItem(item, faseAtual)
+
+      await client.query(
+        `UPDATE itens
+         SET
+           quantidade_final = $1,
+           criterio_fechamento = $2,
+           resolvido = $3
+         WHERE id = $4`,
+        [
+          resolution.finalQuantity,
+          resolution.criterion,
+          resolution.resolved,
+          item.item_id
+        ]
+      )
+
+      const analyzedItem = {
+        ...item,
+        resolution
+      }
+
+      analyzedItems.push(analyzedItem)
+
+      if (!resolution.resolved && resolution.needsNextRecount) {
+        unresolvedItems.push(analyzedItem)
+      }
+    }
 
     let novoStatus = "finalizado"
     let novaFase = faseAtual
 
-    if (divergencias.length > 0) {
-      if (faseAtual < 3) {
-        novoStatus = "recontagem"
-        novaFase = faseAtual + 1
-      } else {
-        novoStatus = "finalizado"
-        novaFase = faseAtual
-      }
+    if (unresolvedItems.length > 0) {
+      novoStatus = "recontagem"
+      novaFase = faseAtual + 1
+    } else {
+      novoStatus = "finalizado"
+      novaFase = faseAtual
+    }
+
+    if (faseAtual >= 3) {
+      novoStatus = "finalizado"
+      novaFase = 3
     }
 
     const updateResult = await client.query(
@@ -199,20 +241,25 @@ async function finishCounting(req, res) {
 
     let message = "Posição finalizada sem divergências"
 
-    if (divergencias.length > 0 && faseAtual === 1) {
+    if (unresolvedItems.length > 0 && faseAtual === 1) {
       message = "Posição enviada para primeira recontagem"
-    } else if (divergencias.length > 0 && faseAtual === 2) {
+    } else if (unresolvedItems.length > 0 && faseAtual === 2) {
       message = "Posição enviada para segunda recontagem"
-    } else if (divergencias.length > 0 && faseAtual === 3) {
-      message = "Posição finalizada após segunda recontagem, ainda com divergências"
+    } else if (faseAtual === 3) {
+      const pendenciasFinais = analyzedItems.filter((item) => !item.resolution.resolved)
+      if (pendenciasFinais.length > 0) {
+        message = "Posição finalizada após terceira contagem, mas ainda sem consenso em alguns itens"
+      } else {
+        message = "Posição finalizada após terceira contagem"
+      }
     }
 
     return res.json({
       message,
       position: updateResult.rows[0],
       faseAnalisada: faseAtual,
-      totalDivergencias: divergencias.length,
-      divergencias
+      totalPendentesParaNovaRecontagem: unresolvedItems.length,
+      pendentesParaNovaRecontagem: unresolvedItems
     })
   } catch (error) {
     await client.query("ROLLBACK")

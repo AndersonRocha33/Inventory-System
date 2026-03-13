@@ -1,4 +1,5 @@
 const pool = require("../db/db")
+const { resolveItem } = require("../services/countResolutionService")
 
 async function listItemsByPosition(req, res) {
   try {
@@ -62,22 +63,32 @@ async function listDivergentItemsByPosition(req, res) {
         COALESCE((
           SELECT c.quantidade_contada
           FROM contagens c
-          WHERE c.item_id = i.id
-            AND c.fase = $2
+          WHERE c.item_id = i.id AND c.fase = 1
           ORDER BY c.data_contagem DESC
           LIMIT 1
-        ), 0) AS quantidade_contada
+        ), NULL) AS q1,
+        COALESCE((
+          SELECT c.quantidade_contada
+          FROM contagens c
+          WHERE c.item_id = i.id AND c.fase = 2
+          ORDER BY c.data_contagem DESC
+          LIMIT 1
+        ), NULL) AS q2,
+        COALESCE((
+          SELECT c.quantidade_contada
+          FROM contagens c
+          WHERE c.item_id = i.id AND c.fase = 3
+          ORDER BY c.data_contagem DESC
+          LIMIT 1
+        ), NULL) AS q3
       FROM itens i
       WHERE i.posicao_id = $1`,
-      [positionId, faseAnterior]
+      [positionId]
     )
 
     const divergentes = result.rows.filter((item) => {
-      const sistema = Number(item.quantidade_sistema || 0)
-      const contado = Number(item.quantidade_contada || 0)
-
-      if (item.encontrado_a_mais) return true
-      return sistema !== contado
+      const resolution = resolveItem(item, faseAnterior)
+      return !resolution.resolved
     })
 
     return res.json(divergentes)
