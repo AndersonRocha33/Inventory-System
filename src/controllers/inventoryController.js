@@ -1,5 +1,5 @@
+const fs = require("fs")
 const pool = require("../db/db")
-
 const { parseCSV } = require("../services/csvService")
 
 async function uploadInventory(req, res) {
@@ -85,6 +85,10 @@ async function uploadInventory(req, res) {
       details: error.message
     })
   } finally {
+    if (req.file?.path && fs.existsSync(req.file.path)) {
+      fs.unlinkSync(req.file.path)
+    }
+
     client.release()
   }
 }

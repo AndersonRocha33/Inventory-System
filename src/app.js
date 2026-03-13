@@ -1,6 +1,8 @@
 require("dotenv").config()
+
 const express = require("express")
 const cors = require("cors")
+
 const inventoryRoutes = require("./routes/inventoryRoutes")
 const positionRoutes = require("./routes/positionRoutes")
 const countRoutes = require("./routes/countRoutes")
