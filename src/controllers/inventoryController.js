@@ -2,6 +2,51 @@ const fs = require("fs")
 const pool = require("../db/db")
 const { parseCSV } = require("../services/csvService")
 
+function normalizeInteger(value) {
+  const number = Number(value || 0)
+  if (Number.isNaN(number)) return 0
+  return Math.round(number)
+}
+
+function groupRows(rows) {
+  const grouped = new Map()
+
+  for (const row of rows) {
+    const posicaoCodigo = String(row.posicao || "").trim()
+    const sku = String(row.sku || "").trim()
+    const descricao = String(row.descricao || "").trim()
+    const quantidade = normalizeInteger(row.quantidade)
+    const lote = row.lote ? String(row.lote).trim() : null
+    const validade = row.validade ? String(row.validade).trim() : null
+
+    if (!posicaoCodigo || !sku || !descricao) {
+      continue
+    }
+
+    const key = `${posicaoCodigo}::${sku}`
+
+    if (!grouped.has(key)) {
+      grouped.set(key, {
+        posicao: posicaoCodigo,
+        sku,
+        descricao,
+        quantidade,
+        lote,
+        validade
+      })
+    } else {
+      const current = grouped.get(key)
+      current.quantidade += quantidade
+
+      if (!current.descricao && descricao) current.descricao = descricao
+      if (!current.lote && lote) current.lote = lote
+      if (!current.validade && validade) current.validade = validade
+    }
+  }
+
+  return Array.from(grouped.values())
+}
+
 async function uploadInventory(req, res) {
   const client = await pool.connect()
 
@@ -17,6 +62,8 @@ async function uploadInventory(req, res) {
     if (!rows.length) {
       return res.status(400).json({ error: "CSV vazio" })
     }
+
+    const groupedRows = groupRows(rows)
 
     await client.query("BEGIN")
 
@@ -34,17 +81,13 @@ async function uploadInventory(req, res) {
     const inventarioId = inventarioResult.rows[0].id
     const positionsMap = new Map()
 
-    for (const row of rows) {
-      const posicaoCodigo = String(row.posicao || "").trim()
-      const sku = String(row.sku || "").trim()
-      const descricao = String(row.descricao || "").trim()
-      const quantidade = Number(row.quantidade || 0)
-      const lote = row.lote ? String(row.lote).trim() : null
-      const validade = row.validade ? String(row.validade).trim() : null
-
-      if (!posicaoCodigo || !sku || !descricao) {
-        continue
-      }
+    for (const row of groupedRows) {
+      const posicaoCodigo = row.posicao
+      const sku = row.sku
+      const descricao = row.descricao
+      const quantidade = normalizeInteger(row.quantidade)
+      const lote = row.lote
+      const validade = row.validade
 
       let posicaoId = positionsMap.get(posicaoCodigo)
 
@@ -63,8 +106,14 @@ async function uploadInventory(req, res) {
 
       await client.query(
         `INSERT INTO itens (
-          posicao_id, sku, descricao, quantidade_sistema, lote, validade
-        ) VALUES ($1, $2, $3, $4, $5, $6)`,
+          posicao_id,
+          sku,
+          descricao,
+          quantidade_sistema,
+          lote,
+          validade,
+          resolvido
+        ) VALUES ($1, $2, $3, $4, $5, $6, false)`,
         [posicaoId, sku, descricao, quantidade, lote, validade]
       )
     }
@@ -74,7 +123,8 @@ async function uploadInventory(req, res) {
     return res.status(201).json({
       message: "Inventário importado com sucesso",
       inventarioId,
-      totalLinhas: rows.length,
+      totalLinhasOriginais: rows.length,
+      totalLinhasConsolidadas: groupedRows.length,
       totalPosicoes: positionsMap.size
     })
   } catch (error) {

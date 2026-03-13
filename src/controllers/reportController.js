@@ -1,37 +1,93 @@
 const pool = require("../db/db")
 const { Parser } = require("json2csv")
 
+const REPORT_QUERY_BY_POSITION = `
+WITH latest_counts AS (
+  SELECT
+    c.item_id,
+    c.quantidade_contada,
+    ROW_NUMBER() OVER (
+      PARTITION BY c.item_id
+      ORDER BY c.data_contagem DESC, c.id DESC
+    ) AS rn
+  FROM contagens c
+),
+grouped AS (
+  SELECT
+    p.codigo AS posicao,
+    p.status AS status_posicao,
+    i.sku,
+    MAX(i.descricao) AS descricao,
+    SUM(COALESCE(i.quantidade_sistema, 0))::integer AS quantidade_sistema,
+    SUM(
+      COALESCE(i.quantidade_final, lc.quantidade_contada, 0)
+    )::integer AS quantidade_contada
+  FROM itens i
+  JOIN posicoes p ON p.id = i.posicao_id
+  LEFT JOIN latest_counts lc
+    ON lc.item_id = i.id
+   AND lc.rn = 1
+  WHERE p.id = $1
+  GROUP BY p.codigo, p.status, i.sku
+)
+SELECT
+  posicao,
+  status_posicao,
+  sku,
+  descricao,
+  quantidade_sistema,
+  quantidade_contada,
+  (quantidade_contada - quantidade_sistema) AS diferenca
+FROM grouped
+ORDER BY sku
+`
+
+const REPORT_QUERY_BY_INVENTORY = `
+WITH latest_counts AS (
+  SELECT
+    c.item_id,
+    c.quantidade_contada,
+    ROW_NUMBER() OVER (
+      PARTITION BY c.item_id
+      ORDER BY c.data_contagem DESC, c.id DESC
+    ) AS rn
+  FROM contagens c
+),
+grouped AS (
+  SELECT
+    p.codigo AS posicao,
+    p.status AS status_posicao,
+    i.sku,
+    MAX(i.descricao) AS descricao,
+    SUM(COALESCE(i.quantidade_sistema, 0))::integer AS quantidade_sistema,
+    SUM(
+      COALESCE(i.quantidade_final, lc.quantidade_contada, 0)
+    )::integer AS quantidade_contada
+  FROM itens i
+  JOIN posicoes p ON p.id = i.posicao_id
+  LEFT JOIN latest_counts lc
+    ON lc.item_id = i.id
+   AND lc.rn = 1
+  WHERE p.inventario_id = $1
+  GROUP BY p.codigo, p.status, i.sku
+)
+SELECT
+  posicao,
+  status_posicao,
+  sku,
+  descricao,
+  quantidade_sistema,
+  quantidade_contada,
+  (quantidade_contada - quantidade_sistema) AS diferenca
+FROM grouped
+ORDER BY posicao, sku
+`
+
 async function positionReport(req, res) {
   try {
     const { positionId } = req.params
 
-    const result = await pool.query(
-      `SELECT
-        p.codigo AS posicao,
-        i.sku,
-        i.descricao,
-        i.quantidade_sistema,
-        COALESCE((
-          SELECT c.quantidade_contada
-          FROM contagens c
-          WHERE c.item_id = i.id
-          ORDER BY c.data_contagem DESC
-          LIMIT 1
-        ), 0) AS quantidade_contada,
-        (
-          COALESCE((
-            SELECT c.quantidade_contada
-            FROM contagens c
-            WHERE c.item_id = i.id
-            ORDER BY c.data_contagem DESC
-            LIMIT 1
-          ), 0) - i.quantidade_sistema
-        ) AS diferenca
-      FROM itens i
-      JOIN posicoes p ON p.id = i.posicao_id
-      WHERE i.posicao_id = $1`,
-      [positionId]
-    )
+    const result = await pool.query(REPORT_QUERY_BY_POSITION, [positionId])
 
     return res.json(result.rows)
   } catch (error) {
@@ -47,64 +103,36 @@ async function inventoryReport(req, res) {
   try {
     const { inventarioId } = req.params
 
-    const itemsResult = await pool.query(
-      `SELECT
-        p.codigo AS posicao,
-        p.status AS status_posicao,
-        i.id AS item_id,
-        i.sku,
-        i.descricao,
-        i.quantidade_sistema,
-        i.encontrado_a_mais,
-        COALESCE((
-          SELECT c.quantidade_contada
-          FROM contagens c
-          WHERE c.item_id = i.id
-          ORDER BY c.data_contagem DESC
-          LIMIT 1
-        ), 0) AS quantidade_contada
-      FROM itens i
-      JOIN posicoes p ON p.id = i.posicao_id
-      WHERE p.inventario_id = $1
-      ORDER BY p.codigo, i.descricao`,
-      [inventarioId]
+    const result = await pool.query(REPORT_QUERY_BY_INVENTORY, [inventarioId])
+    const rows = result.rows
+
+    const totalItens = rows.length
+    const itensContados = rows.filter((item) => Number(item.quantidade_contada) > 0).length
+    const itensCorretos = rows.filter(
+      (item) => Number(item.quantidade_sistema) === Number(item.quantidade_contada)
+    ).length
+    const itensDivergentes = rows.filter(
+      (item) => Number(item.quantidade_sistema) !== Number(item.quantidade_contada)
     )
 
     const positionsResult = await pool.query(
-      `SELECT
-        id,
-        codigo,
-        status
-      FROM posicoes
-      WHERE inventario_id = $1`,
+      `SELECT id, codigo, status
+       FROM posicoes
+       WHERE inventario_id = $1`,
       [inventarioId]
     )
 
-    const rows = itemsResult.rows
     const positions = positionsResult.rows
-
-    const totalItens = rows.length
     const totalPosicoes = positions.length
-
-    const itensContados = rows.filter((item) => {
-      return Number(item.quantidade_contada) > 0 || item.encontrado_a_mais
-    }).length
-
-    const itensCorretos = rows.filter((item) => {
-      return Number(item.quantidade_sistema) === Number(item.quantidade_contada)
-    }).length
-
-    const itensDivergentes = rows.filter((item) => {
-      return Number(item.quantidade_sistema) !== Number(item.quantidade_contada)
-    })
-
     const posicoesFinalizadas = positions.filter((p) => p.status === "finalizado").length
     const posicoesRecontagem = positions.filter((p) => p.status === "recontagem").length
     const posicoesEmAndamento = positions.filter((p) => p.status === "contando").length
 
     const acuracidade = totalItens > 0 ? (itensCorretos / totalItens) * 100 : 0
     const percentualItensContados = totalItens > 0 ? (itensContados / totalItens) * 100 : 0
-    const percentualPosicoesContadas = totalPosicoes > 0 ? (posicoesFinalizadas / totalPosicoes) * 100 : 0
+    const percentualPosicoesContadas = totalPosicoes > 0
+      ? (posicoesFinalizadas / totalPosicoes) * 100
+      : 0
 
     const top10Divergentes = itensDivergentes
       .map((item) => ({
@@ -146,31 +174,23 @@ async function exportInventoryCSV(req, res) {
   try {
     const { inventarioId } = req.params
 
-    const result = await pool.query(
-      `SELECT
-        p.codigo AS posicao,
-        p.status AS status_posicao,
-        i.sku,
-        i.descricao,
-        i.quantidade_sistema,
-        COALESCE((
-          SELECT c.quantidade_contada
-          FROM contagens c
-          WHERE c.item_id = i.id
-          ORDER BY c.data_contagem DESC
-          LIMIT 1
-        ), 0) AS quantidade_contada
-      FROM itens i
-      JOIN posicoes p ON p.id = i.posicao_id
-      WHERE p.inventario_id = $1
-      ORDER BY p.codigo, i.descricao`,
-      [inventarioId]
-    )
+    const result = await pool.query(REPORT_QUERY_BY_INVENTORY, [inventarioId])
 
-    const parser = new Parser()
+    const parser = new Parser({
+      fields: [
+        "posicao",
+        "status_posicao",
+        "sku",
+        "descricao",
+        "quantidade_sistema",
+        "quantidade_contada",
+        "diferenca"
+      ]
+    })
+
     const csv = parser.parse(result.rows)
 
-    res.header("Content-Type", "text/csv")
+    res.header("Content-Type", "text/csv; charset=utf-8")
     res.attachment("inventario.csv")
 
     return res.send(csv)
