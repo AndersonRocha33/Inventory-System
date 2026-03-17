@@ -117,6 +117,91 @@ async function inventoryReport(req, res) {
       .sort((a, b) => b.diferencaAbsoluta - a.diferencaAbsoluta)
       .slice(0, 10)
 
+    // gráfico: top SKUs com maior divergência acumulada
+    const divergenciaPorSkuMap = new Map()
+
+    for (const item of itensDivergentes) {
+      const key = `${item.sku}||${item.descricao}`
+      const atual = divergenciaPorSkuMap.get(key) || {
+        sku: item.sku,
+        descricao: item.descricao,
+        divergenciaTotal: 0
+      }
+
+      atual.divergenciaTotal += Math.abs(
+        Number(item.quantidade_contada) - Number(item.quantidade_sistema)
+      )
+
+      divergenciaPorSkuMap.set(key, atual)
+    }
+
+    const graficoDivergencias = Array.from(divergenciaPorSkuMap.values())
+      .sort((a, b) => b.divergenciaTotal - a.divergenciaTotal)
+      .slice(0, 10)
+
+    // ranking de operadores
+    const operatorResult = await pool.query(
+      `WITH item_final AS (
+         SELECT
+           i.id AS item_id,
+           p.inventario_id,
+           i.quantidade_sistema::integer AS quantidade_sistema,
+           COALESCE(i.quantidade_final, 0)::integer AS quantidade_final
+         FROM itens i
+         JOIN posicoes p ON p.id = i.posicao_id
+         WHERE p.inventario_id = $1
+       ),
+       last_count_per_phase AS (
+         SELECT
+           c.item_id,
+           c.operador,
+           c.fase,
+           c.quantidade_contada::integer AS quantidade_contada,
+           ROW_NUMBER() OVER (
+             PARTITION BY c.item_id, c.fase
+             ORDER BY c.data_contagem DESC, c.id DESC
+           ) AS rn
+         FROM contagens c
+         JOIN item_final f ON f.item_id = c.item_id
+       )
+       SELECT
+         l.operador,
+         COUNT(*)::integer AS total_contagens,
+         SUM(
+           CASE
+             WHEN l.quantidade_contada = f.quantidade_sistema THEN 1
+             ELSE 0
+           END
+         )::integer AS contagens_corretas,
+         SUM(
+           CASE
+             WHEN l.quantidade_contada <> f.quantidade_sistema THEN 1
+             ELSE 0
+           END
+         )::integer AS contagens_divergentes
+       FROM last_count_per_phase l
+       JOIN item_final f ON f.item_id = l.item_id
+       WHERE l.rn = 1
+       GROUP BY l.operador
+       ORDER BY total_contagens DESC, contagens_corretas DESC`,
+      [inventarioId]
+    )
+
+    const rankingOperadores = operatorResult.rows.map((row) => {
+      const total = Number(row.total_contagens || 0)
+      const corretas = Number(row.contagens_corretas || 0)
+      const divergentes = Number(row.contagens_divergentes || 0)
+      const percentualAcerto = total > 0 ? ((corretas / total) * 100).toFixed(2) : "0.00"
+
+      return {
+        operador: row.operador,
+        totalContagens: total,
+        contagensCorretas: corretas,
+        contagensDivergentes: divergentes,
+        percentualAcerto
+      }
+    })
+
     return res.json({
       resumo: {
         totalItens,
@@ -132,6 +217,8 @@ async function inventoryReport(req, res) {
         percentualPosicoesContadas: percentualPosicoesContadas.toFixed(2)
       },
       top10Divergentes,
+      graficoDivergencias,
+      rankingOperadores,
       dados: rows
     })
   } catch (error) {
