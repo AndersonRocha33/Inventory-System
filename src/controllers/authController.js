@@ -114,7 +114,22 @@ async function login(req, res) {
   }
 }
 
+async function me(req, res) {
+  try {
+    return res.json({
+      user: req.user
+    })
+  } catch (error) {
+    console.error(error)
+    return res.status(500).json({
+      error: "Erro ao obter usuário logado",
+      details: error.message
+    })
+  }
+}
+
 module.exports = {
   register,
-  login
+  login,
+  me
 }

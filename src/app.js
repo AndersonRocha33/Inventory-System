@@ -8,6 +8,7 @@ const inventoryRoutes = require("./routes/inventoryRoutes")
 const positionRoutes = require("./routes/positionRoutes")
 const countRoutes = require("./routes/countRoutes")
 const reportRoutes = require("./routes/reportRoutes")
+const authMiddleware = require("./middlewares/authMiddleware")
 
 const app = express()
 
@@ -20,10 +21,11 @@ app.use(cors({
 app.use(express.json())
 
 app.use("/auth", authRoutes)
-app.use("/inventory", inventoryRoutes)
-app.use("/inventory", positionRoutes)
-app.use("/inventory", countRoutes)
-app.use("/inventory", reportRoutes)
+
+app.use("/inventory", authMiddleware, inventoryRoutes)
+app.use("/inventory", authMiddleware, positionRoutes)
+app.use("/inventory", authMiddleware, countRoutes)
+app.use("/inventory", authMiddleware, reportRoutes)
 
 app.get("/", (req, res) => {
   res.send("Inventory API running")
