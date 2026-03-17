@@ -3,6 +3,7 @@ require("dotenv").config()
 const express = require("express")
 const cors = require("cors")
 
+const authRoutes = require("./routes/authRoutes")
 const inventoryRoutes = require("./routes/inventoryRoutes")
 const positionRoutes = require("./routes/positionRoutes")
 const countRoutes = require("./routes/countRoutes")
@@ -18,6 +19,7 @@ app.use(cors({
 
 app.use(express.json())
 
+app.use("/auth", authRoutes)
 app.use("/inventory", inventoryRoutes)
 app.use("/inventory", positionRoutes)
 app.use("/inventory", countRoutes)
