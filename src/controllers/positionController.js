@@ -42,8 +42,15 @@ async function startCounting(req, res) {
       return res.status(400).json({ error: "Operador é obrigatório" })
     }
 
+    const nomeOperador = operador.trim()
+
     const positionResult = await pool.query(
-      `SELECT id, status, fase_atual
+      `SELECT
+         id,
+         codigo,
+         status,
+         operador_atual,
+         fase_atual
        FROM posicoes
        WHERE id = $1`,
       [positionId]
@@ -55,7 +62,16 @@ async function startCounting(req, res) {
 
     const position = positionResult.rows[0]
     const faseAtual = Number(position.fase_atual || 1)
-    const nomeOperador = operador.trim()
+
+    if (
+      position.status === "contando" &&
+      position.operador_atual &&
+      position.operador_atual !== nomeOperador
+    ) {
+      return res.status(409).json({
+        error: `Posição em uso por ${position.operador_atual}`
+      })
+    }
 
     let campoOperador = "primeiro_operador"
     if (faseAtual === 2) campoOperador = "segundo_operador"
@@ -66,10 +82,10 @@ async function startCounting(req, res) {
        SET
          status = 'contando',
          operador_atual = $1,
-         data_inicio = NOW(),
+         data_inicio = COALESCE(data_inicio, NOW()),
          ${campoOperador} = COALESCE(${campoOperador}, $1)
        WHERE id = $2
-         AND status IN ('pendente', 'recontagem')
+         AND status IN ('pendente', 'recontagem', 'contando')
        RETURNING
          id,
          codigo,
@@ -82,12 +98,6 @@ async function startCounting(req, res) {
          data_inicio`,
       [nomeOperador, positionId]
     )
-
-    if (result.rowCount === 0) {
-      return res.status(409).json({
-        error: "Posição não disponível para contagem"
-      })
-    }
 
     return res.json({
       message: "Contagem iniciada com sucesso",
