@@ -1,5 +1,5 @@
 const pool = require("../db/db")
-const { resolveItem } = require("../services/countResolutionService")
+const { resolveItemUpToPhase } = require("../services/countResolutionService")
 
 async function listPositions(req, res) {
   try {
@@ -144,21 +144,21 @@ async function finishCounting(req, res) {
           SELECT c.quantidade_contada
           FROM contagens c
           WHERE c.item_id = i.id AND c.fase = 1
-          ORDER BY c.data_contagem DESC
+          ORDER BY c.data_contagem DESC, c.id DESC
           LIMIT 1
         ), NULL) AS q1,
         COALESCE((
           SELECT c.quantidade_contada
           FROM contagens c
           WHERE c.item_id = i.id AND c.fase = 2
-          ORDER BY c.data_contagem DESC
+          ORDER BY c.data_contagem DESC, c.id DESC
           LIMIT 1
         ), NULL) AS q2,
         COALESCE((
           SELECT c.quantidade_contada
           FROM contagens c
           WHERE c.item_id = i.id AND c.fase = 3
-          ORDER BY c.data_contagem DESC
+          ORDER BY c.data_contagem DESC, c.id DESC
           LIMIT 1
         ), NULL) AS q3
       FROM itens i
@@ -170,7 +170,7 @@ async function finishCounting(req, res) {
     const analyzedItems = []
 
     for (const item of itemsResult.rows) {
-      const resolution = resolveItem(item, faseAtual)
+      const resolution = resolveItemUpToPhase(item, faseAtual)
 
       await client.query(
         `UPDATE itens
@@ -194,7 +194,7 @@ async function finishCounting(req, res) {
 
       analyzedItems.push(analyzedItem)
 
-      if (!resolution.resolved && resolution.needsNextRecount) {
+      if (!resolution.resolved && faseAtual < 3) {
         unresolvedItems.push(analyzedItem)
       }
     }
@@ -202,17 +202,12 @@ async function finishCounting(req, res) {
     let novoStatus = "finalizado"
     let novaFase = faseAtual
 
-    if (unresolvedItems.length > 0) {
+    if (unresolvedItems.length > 0 && faseAtual < 3) {
       novoStatus = "recontagem"
       novaFase = faseAtual + 1
     } else {
       novoStatus = "finalizado"
       novaFase = faseAtual
-    }
-
-    if (faseAtual >= 3) {
-      novoStatus = "finalizado"
-      novaFase = 3
     }
 
     const updateResult = await client.query(

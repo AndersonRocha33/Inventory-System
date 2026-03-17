@@ -7,11 +7,11 @@ function toNumber(value) {
 function countOccurrences(values) {
   const map = new Map()
 
-  values.forEach((value) => {
-    if (value === null || value === undefined) return
+  for (const value of values) {
+    if (value === null || value === undefined) continue
     const key = String(value)
     map.set(key, (map.get(key) || 0) + 1)
-  })
+  }
 
   return map
 }
@@ -28,99 +28,46 @@ function getRepeatedQuantity(values) {
   return null
 }
 
-function resolveItem(item, phaseToAnalyze) {
+/**
+ * Resolve item considerando TODAS as fases até `upToPhase`
+ * e não só a fase atual isolada.
+ */
+function resolveItemUpToPhase(item, upToPhase) {
   const sistema = toNumber(item.quantidade_sistema) ?? 0
   const q1 = toNumber(item.q1)
   const q2 = toNumber(item.q2)
   const q3 = toNumber(item.q3)
 
-  // fase 1: só resolve se bater no sistema
-  if (phaseToAnalyze === 1) {
-    if (q1 !== null && q1 === sistema) {
-      return {
-        resolved: true,
-        finalQuantity: sistema,
-        criterion: "saldo_sistema",
-        needsNextRecount: false
-      }
-    }
+  const counts = []
+  if (upToPhase >= 1) counts.push(q1)
+  if (upToPhase >= 2) counts.push(q2)
+  if (upToPhase >= 3) counts.push(q3)
 
+  const matchedSystem = counts.find((value) => value !== null && value === sistema)
+  if (matchedSystem !== undefined) {
     return {
-      resolved: false,
-      finalQuantity: null,
-      criterion: null,
-      needsNextRecount: true
+      resolved: true,
+      finalQuantity: sistema,
+      criterion: "saldo_sistema"
     }
   }
 
-  // fase 2: resolve se bater no sistema OU repetir 2x
-  if (phaseToAnalyze === 2) {
-    if (q2 !== null && q2 === sistema) {
-      return {
-        resolved: true,
-        finalQuantity: sistema,
-        criterion: "saldo_sistema",
-        needsNextRecount: false
-      }
-    }
-
-    if (q1 !== null && q2 !== null && q1 === q2) {
-      return {
-        resolved: true,
-        finalQuantity: q1,
-        criterion: "repeticao_2x",
-        needsNextRecount: false
-      }
-    }
-
+  const repeatedQuantity = getRepeatedQuantity(counts)
+  if (repeatedQuantity !== null) {
     return {
-      resolved: false,
-      finalQuantity: null,
-      criterion: null,
-      needsNextRecount: true
-    }
-  }
-
-  // fase 3: resolve se qualquer uma bater no sistema OU qualquer quantidade repetir 2x
-  if (phaseToAnalyze >= 3) {
-    const counts = [q1, q2, q3]
-
-    const matchedSystem = counts.find((value) => value !== null && value === sistema)
-    if (matchedSystem !== undefined) {
-      return {
-        resolved: true,
-        finalQuantity: sistema,
-        criterion: "saldo_sistema",
-        needsNextRecount: false
-      }
-    }
-
-    const repeatedQuantity = getRepeatedQuantity(counts)
-    if (repeatedQuantity !== null) {
-      return {
-        resolved: true,
-        finalQuantity: repeatedQuantity,
-        criterion: "repeticao_2x",
-        needsNextRecount: false
-      }
-    }
-
-    return {
-      resolved: false,
-      finalQuantity: null,
-      criterion: "sem_consenso",
-      needsNextRecount: false
+      resolved: true,
+      finalQuantity: repeatedQuantity,
+      criterion: "repeticao_2x"
     }
   }
 
   return {
     resolved: false,
     finalQuantity: null,
-    criterion: null,
-    needsNextRecount: false
+    criterion: null
   }
 }
 
 module.exports = {
-  resolveItem
+  resolveItemUpToPhase
 }
