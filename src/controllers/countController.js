@@ -101,6 +101,57 @@ async function listDivergentItemsByPosition(req, res) {
   }
 }
 
+async function listSavedItemsByPosition(req, res) {
+  try {
+    const { positionId } = req.params
+
+    const positionResult = await pool.query(
+      `SELECT fase_atual
+       FROM posicoes
+       WHERE id = $1`,
+      [positionId]
+    )
+
+    if (positionResult.rowCount === 0) {
+      return res.status(404).json({ error: "Posição não encontrada" })
+    }
+
+    const faseAtual = Number(positionResult.rows[0].fase_atual || 1)
+
+    const result = await pool.query(
+      `SELECT
+        i.id,
+        i.sku,
+        i.descricao,
+        i.lote,
+        i.validade,
+        c.quantidade_contada,
+        c.operador,
+        c.data_contagem
+      FROM itens i
+      JOIN LATERAL (
+        SELECT *
+        FROM contagens c
+        WHERE c.item_id = i.id
+          AND c.fase = $2
+        ORDER BY c.data_contagem DESC, c.id DESC
+        LIMIT 1
+      ) c ON true
+      WHERE i.posicao_id = $1
+      ORDER BY i.descricao`,
+      [positionId, faseAtual]
+    )
+
+    return res.json(result.rows)
+  } catch (error) {
+    console.error(error)
+    return res.status(500).json({
+      error: "Erro ao listar itens salvos",
+      details: error.message
+    })
+  }
+}
+
 async function registerCount(req, res) {
   try {
     const { itemId } = req.params
@@ -139,8 +190,9 @@ async function registerCount(req, res) {
         operador,
         quantidade_contada,
         tipo,
-        fase
-      ) VALUES ($1, $2, $3, $4, $5, $6)
+        fase,
+        atualizado_em
+      ) VALUES ($1, $2, $3, $4, $5, $6, NOW())
       RETURNING *`,
       [
         item.id,
@@ -210,8 +262,9 @@ async function addExtraItem(req, res) {
         operador,
         quantidade_contada,
         tipo,
-        fase
-      ) VALUES ($1, $2, $3, $4, $5, $6)`,
+        fase,
+        atualizado_em
+      ) VALUES ($1, $2, $3, $4, $5, $6, NOW())`,
       [
         item.id,
         positionId,
@@ -238,6 +291,7 @@ async function addExtraItem(req, res) {
 module.exports = {
   listItemsByPosition,
   listDivergentItemsByPosition,
+  listSavedItemsByPosition,
   registerCount,
   addExtraItem
 }

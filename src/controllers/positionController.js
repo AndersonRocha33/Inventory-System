@@ -4,9 +4,10 @@ const { resolveItemUpToPhase } = require("../services/countResolutionService")
 async function listPositions(req, res) {
   try {
     const { inventarioId } = req.params
+    const { operador } = req.query
 
-    const result = await pool.query(
-      `SELECT
+    let query = `
+      SELECT
         id,
         codigo,
         status,
@@ -19,9 +20,33 @@ async function listPositions(req, res) {
         data_fim
       FROM posicoes
       WHERE inventario_id = $1
-      ORDER BY codigo`,
-      [inventarioId]
-    )
+    `
+
+    const params = [inventarioId]
+
+    if (operador) {
+      params.push(operador.trim())
+
+      query += `
+        AND NOT (
+          fase_atual = 2
+          AND primeiro_operador = $2
+          AND status = 'recontagem'
+        )
+        AND NOT (
+          fase_atual = 3
+          AND (
+            primeiro_operador = $2
+            OR segundo_operador = $2
+          )
+          AND status = 'recontagem'
+        )
+      `
+    }
+
+    query += ` ORDER BY codigo`
+
+    const result = await pool.query(query, params)
 
     return res.json(result.rows)
   } catch (error) {
@@ -46,11 +71,14 @@ async function startCounting(req, res) {
 
     const positionResult = await pool.query(
       `SELECT
-         id,
-         codigo,
-         status,
-         operador_atual,
-         fase_atual
+        id,
+        codigo,
+        status,
+        operador_atual,
+        primeiro_operador,
+        segundo_operador,
+        terceiro_operador,
+        fase_atual
        FROM posicoes
        WHERE id = $1`,
       [positionId]
@@ -70,6 +98,27 @@ async function startCounting(req, res) {
     ) {
       return res.status(409).json({
         error: `Posição em uso por ${position.operador_atual}`
+      })
+    }
+
+    if (
+      faseAtual === 2 &&
+      position.primeiro_operador === nomeOperador &&
+      position.status === "recontagem"
+    ) {
+      return res.status(403).json({
+        error: "Este operador já realizou a primeira contagem desta posição"
+      })
+    }
+
+    if (
+      faseAtual === 3 &&
+      (position.primeiro_operador === nomeOperador ||
+        position.segundo_operador === nomeOperador) &&
+      position.status === "recontagem"
+    ) {
+      return res.status(403).json({
+        error: "Este operador já participou das contagens anteriores desta posição"
       })
     }
 
@@ -215,9 +264,6 @@ async function finishCounting(req, res) {
     if (unresolvedItems.length > 0 && faseAtual < 3) {
       novoStatus = "recontagem"
       novaFase = faseAtual + 1
-    } else {
-      novoStatus = "finalizado"
-      novaFase = faseAtual
     }
 
     const updateResult = await client.query(
@@ -252,6 +298,7 @@ async function finishCounting(req, res) {
       message = "Posição enviada para segunda recontagem"
     } else if (faseAtual === 3) {
       const pendenciasFinais = analyzedItems.filter((item) => !item.resolution.resolved)
+
       if (pendenciasFinais.length > 0) {
         message = "Posição finalizada após terceira contagem, mas ainda sem consenso em alguns itens"
       } else {
