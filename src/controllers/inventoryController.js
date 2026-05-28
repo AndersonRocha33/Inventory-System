@@ -19,9 +19,7 @@ function groupRows(rows) {
     const lote = row.lote ? String(row.lote).trim() : null
     const validade = row.validade ? String(row.validade).trim() : null
 
-    if (!posicaoCodigo || !sku || !descricao) {
-      continue
-    }
+    if (!posicaoCodigo || !sku || !descricao) continue
 
     const key = `${posicaoCodigo}::${sku}`
 
@@ -37,10 +35,6 @@ function groupRows(rows) {
     } else {
       const current = grouped.get(key)
       current.quantidade += quantidade
-
-      if (!current.descricao && descricao) current.descricao = descricao
-      if (!current.lote && lote) current.lote = lote
-      if (!current.validade && validade) current.validade = validade
     }
   }
 
@@ -52,9 +46,14 @@ async function uploadInventory(req, res) {
 
   try {
     const file = req.file
+    const { dataInventario } = req.body || {}
 
     if (!file) {
       return res.status(400).json({ error: "Arquivo não enviado" })
+    }
+
+    if (!dataInventario) {
+      return res.status(400).json({ error: "Data do inventário é obrigatória" })
     }
 
     const rows = await parseCSV(file.path)
@@ -67,29 +66,22 @@ async function uploadInventory(req, res) {
 
     await client.query("BEGIN")
 
-    const nomeInventario = `Inventário ${new Date().toLocaleString("pt-BR")}`
     const cliente = rows[0].cliente || null
     const deposito = rows[0].deposito || null
+    const nomeInventario = `Inventário ${dataInventario}`
 
     const inventarioResult = await client.query(
-      `INSERT INTO inventarios (nome, cliente, deposito)
-       VALUES ($1, $2, $3)
-       RETURNING id`,
-      [nomeInventario, cliente, deposito]
+      `INSERT INTO inventarios (nome, cliente, deposito, data_inicio)
+       VALUES ($1, $2, $3, $4)
+       RETURNING id, nome, data_inicio`,
+      [nomeInventario, cliente, deposito, dataInventario]
     )
 
     const inventarioId = inventarioResult.rows[0].id
     const positionsMap = new Map()
 
     for (const row of groupedRows) {
-      const posicaoCodigo = row.posicao
-      const sku = row.sku
-      const descricao = row.descricao
-      const quantidade = normalizeInteger(row.quantidade)
-      const lote = row.lote
-      const validade = row.validade
-
-      let posicaoId = positionsMap.get(posicaoCodigo)
+      let posicaoId = positionsMap.get(row.posicao)
 
       if (!posicaoId) {
         const posicaoResult = await client.query(
@@ -97,11 +89,11 @@ async function uploadInventory(req, res) {
            VALUES ($1, $2)
            ON CONFLICT (inventario_id, codigo) DO UPDATE SET codigo = EXCLUDED.codigo
            RETURNING id`,
-          [inventarioId, posicaoCodigo]
+          [inventarioId, row.posicao]
         )
 
         posicaoId = posicaoResult.rows[0].id
-        positionsMap.set(posicaoCodigo, posicaoId)
+        positionsMap.set(row.posicao, posicaoId)
       }
 
       await client.query(
@@ -114,7 +106,14 @@ async function uploadInventory(req, res) {
           validade,
           resolvido
         ) VALUES ($1, $2, $3, $4, $5, $6, false)`,
-        [posicaoId, sku, descricao, quantidade, lote, validade]
+        [
+          posicaoId,
+          row.sku,
+          row.descricao,
+          row.quantidade,
+          row.lote,
+          row.validade
+        ]
       )
     }
 
@@ -123,6 +122,8 @@ async function uploadInventory(req, res) {
     return res.status(201).json({
       message: "Inventário importado com sucesso",
       inventarioId,
+      nomeInventario,
+      dataInventario,
       totalLinhasOriginais: rows.length,
       totalLinhasConsolidadas: groupedRows.length,
       totalPosicoes: positionsMap.size
@@ -130,6 +131,7 @@ async function uploadInventory(req, res) {
   } catch (error) {
     await client.query("ROLLBACK")
     console.error(error)
+
     return res.status(500).json({
       error: "Erro ao importar inventário",
       details: error.message
@@ -143,4 +145,33 @@ async function uploadInventory(req, res) {
   }
 }
 
-module.exports = { uploadInventory }
+async function listInventories(req, res) {
+  try {
+    const result = await pool.query(
+      `SELECT
+        id,
+        nome,
+        cliente,
+        deposito,
+        data_inicio,
+        data_criacao,
+        status
+      FROM inventarios
+      ORDER BY data_inicio DESC, id DESC`
+    )
+
+    return res.json(result.rows)
+  } catch (error) {
+    console.error(error)
+
+    return res.status(500).json({
+      error: "Erro ao listar inventários",
+      details: error.message
+    })
+  }
+}
+
+module.exports = {
+  uploadInventory,
+  listInventories
+}
