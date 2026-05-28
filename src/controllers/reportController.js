@@ -19,9 +19,7 @@ grouped AS (
     i.sku,
     MAX(i.descricao) AS descricao,
     SUM(COALESCE(i.quantidade_sistema, 0))::integer AS quantidade_sistema,
-    SUM(
-      COALESCE(i.quantidade_final, lc.quantidade_contada, 0)
-    )::integer AS quantidade_contada
+    SUM(COALESCE(i.quantidade_final, lc.quantidade_contada, 0))::integer AS quantidade_contada
   FROM itens i
   JOIN posicoes p ON p.id = i.posicao_id
   LEFT JOIN latest_counts lc
@@ -47,16 +45,29 @@ async function positionReport(req, res) {
     const { positionId } = req.params
 
     const result = await pool.query(
-      `SELECT
+      `WITH latest_counts AS (
+        SELECT
+          c.item_id,
+          c.quantidade_contada,
+          ROW_NUMBER() OVER (
+            PARTITION BY c.item_id
+            ORDER BY c.data_contagem DESC, c.id DESC
+          ) AS rn
+        FROM contagens c
+      )
+      SELECT
         p.codigo AS posicao,
         p.status AS status_posicao,
         i.sku,
         i.descricao,
         i.quantidade_sistema::integer AS quantidade_sistema,
-        COALESCE(i.quantidade_final, 0)::integer AS quantidade_contada,
-        (COALESCE(i.quantidade_final, 0) - i.quantidade_sistema)::integer AS diferenca
+        COALESCE(i.quantidade_final, lc.quantidade_contada, 0)::integer AS quantidade_contada,
+        (COALESCE(i.quantidade_final, lc.quantidade_contada, 0) - i.quantidade_sistema)::integer AS diferenca
       FROM itens i
       JOIN posicoes p ON p.id = i.posicao_id
+      LEFT JOIN latest_counts lc
+        ON lc.item_id = i.id
+       AND lc.rn = 1
       WHERE i.posicao_id = $1
       ORDER BY i.sku`,
       [positionId]
@@ -79,15 +90,6 @@ async function inventoryReport(req, res) {
     const result = await pool.query(REPORT_QUERY_BY_INVENTORY, [inventarioId])
     const rows = result.rows
 
-    const totalItens = rows.length
-    const itensContados = rows.filter((item) => Number(item.quantidade_contada) > 0).length
-    const itensCorretos = rows.filter(
-      (item) => Number(item.quantidade_sistema) === Number(item.quantidade_contada)
-    ).length
-    const itensDivergentes = rows.filter(
-      (item) => Number(item.quantidade_sistema) !== Number(item.quantidade_contada)
-    )
-
     const positionsResult = await pool.query(
       `SELECT id, codigo, status
        FROM posicoes
@@ -96,18 +98,64 @@ async function inventoryReport(req, res) {
     )
 
     const positions = positionsResult.rows
+
+    const totalItens = rows.length
     const totalPosicoes = positions.length
-    const posicoesFinalizadas = positions.filter((p) => p.status === "finalizado").length
-    const posicoesRecontagem = positions.filter((p) => p.status === "recontagem").length
-    const posicoesEmAndamento = positions.filter((p) => p.status === "contando").length
 
-    const acuracidade = totalItens > 0 ? (itensCorretos / totalItens) * 100 : 0
-    const percentualItensContados = totalItens > 0 ? (itensContados / totalItens) * 100 : 0
-    const percentualPosicoesContadas = totalPosicoes > 0
-      ? (posicoesFinalizadas / totalPosicoes) * 100
-      : 0
+    const posicoesFinalizadas = positions.filter(
+      (position) => position.status === "finalizado"
+    ).length
 
-    const top10Divergentes = itensDivergentes
+    const posicoesRecontagem = positions.filter(
+      (position) => position.status === "recontagem"
+    ).length
+
+    const posicoesEmAndamento = positions.filter(
+      (position) => position.status === "contando"
+    ).length
+
+    const posicoesPendentes = positions.filter(
+      (position) => position.status === "pendente"
+    ).length
+
+    const itensContados = rows.filter((item) =>
+      Number(item.quantidade_contada) > 0 ||
+      item.status_posicao === "finalizado" ||
+      item.status_posicao === "recontagem"
+    ).length
+
+    const percentualItensContados =
+      totalItens > 0 ? (itensContados / totalItens) * 100 : 0
+
+    const percentualPosicoesContadas =
+      totalPosicoes > 0 ? (posicoesFinalizadas / totalPosicoes) * 100 : 0
+
+    const itensAvaliados = rows.filter(
+      (item) => item.status_posicao === "finalizado"
+    )
+
+    const totalItensAvaliados = itensAvaliados.length
+
+    const itensCorretosAvaliados = itensAvaliados.filter(
+      (item) => Number(item.quantidade_sistema) === Number(item.quantidade_contada)
+    )
+
+    const itensDivergentesAvaliados = itensAvaliados.filter(
+      (item) => Number(item.quantidade_sistema) !== Number(item.quantidade_contada)
+    )
+
+    const acuracidadeAtual =
+      totalItensAvaliados > 0
+        ? (itensCorretosAvaliados.length / totalItensAvaliados) * 100
+        : 0
+
+    const itensDivergentesGeral = rows.filter(
+      (item) =>
+        item.status_posicao === "finalizado" &&
+        Number(item.quantidade_sistema) !== Number(item.quantidade_contada)
+    )
+
+    const top10Divergentes = itensDivergentesGeral
       .map((item) => ({
         ...item,
         diferencaAbsoluta: Math.abs(
@@ -117,11 +165,11 @@ async function inventoryReport(req, res) {
       .sort((a, b) => b.diferencaAbsoluta - a.diferencaAbsoluta)
       .slice(0, 10)
 
-    // gráfico: top SKUs com maior divergência acumulada
     const divergenciaPorSkuMap = new Map()
 
-    for (const item of itensDivergentes) {
+    for (const item of itensDivergentesGeral) {
       const key = `${item.sku}||${item.descricao}`
+
       const atual = divergenciaPorSkuMap.get(key) || {
         sku: item.sku,
         descricao: item.descricao,
@@ -139,14 +187,13 @@ async function inventoryReport(req, res) {
       .sort((a, b) => b.divergenciaTotal - a.divergenciaTotal)
       .slice(0, 10)
 
-    // ranking de operadores
     const operatorResult = await pool.query(
-      `WITH item_final AS (
+      `WITH item_base AS (
          SELECT
            i.id AS item_id,
            p.inventario_id,
            i.quantidade_sistema::integer AS quantidade_sistema,
-           COALESCE(i.quantidade_final, 0)::integer AS quantidade_final
+           COALESCE(i.quantidade_final, i.quantidade_sistema)::integer AS quantidade_final
          FROM itens i
          JOIN posicoes p ON p.id = i.posicao_id
          WHERE p.inventario_id = $1
@@ -162,25 +209,25 @@ async function inventoryReport(req, res) {
              ORDER BY c.data_contagem DESC, c.id DESC
            ) AS rn
          FROM contagens c
-         JOIN item_final f ON f.item_id = c.item_id
+         JOIN item_base ib ON ib.item_id = c.item_id
        )
        SELECT
          l.operador,
          COUNT(*)::integer AS total_contagens,
          SUM(
            CASE
-             WHEN l.quantidade_contada = f.quantidade_sistema THEN 1
+             WHEN l.quantidade_contada = ib.quantidade_final THEN 1
              ELSE 0
            END
          )::integer AS contagens_corretas,
          SUM(
            CASE
-             WHEN l.quantidade_contada <> f.quantidade_sistema THEN 1
+             WHEN l.quantidade_contada <> ib.quantidade_final THEN 1
              ELSE 0
            END
          )::integer AS contagens_divergentes
        FROM last_count_per_phase l
-       JOIN item_final f ON f.item_id = l.item_id
+       JOIN item_base ib ON ib.item_id = l.item_id
        WHERE l.rn = 1
        GROUP BY l.operador
        ORDER BY total_contagens DESC, contagens_corretas DESC`,
@@ -191,7 +238,9 @@ async function inventoryReport(req, res) {
       const total = Number(row.total_contagens || 0)
       const corretas = Number(row.contagens_corretas || 0)
       const divergentes = Number(row.contagens_divergentes || 0)
-      const percentualAcerto = total > 0 ? ((corretas / total) * 100).toFixed(2) : "0.00"
+
+      const percentualAcerto =
+        total > 0 ? ((corretas / total) * 100).toFixed(2) : "0.00"
 
       return {
         operador: row.operador,
@@ -204,16 +253,21 @@ async function inventoryReport(req, res) {
 
     return res.json({
       resumo: {
+        acuracidadeAtual: acuracidadeAtual.toFixed(2),
+
         totalItens,
         itensContados,
-        itensCorretos,
-        itensDivergentes: itensDivergentes.length,
+        percentualItensContados: percentualItensContados.toFixed(2),
+
+        totalItensAvaliados,
+        itensCorretosAvaliados: itensCorretosAvaliados.length,
+        itensDivergentesAvaliados: itensDivergentesAvaliados.length,
+
         totalPosicoes,
         posicoesFinalizadas,
+        posicoesPendentes,
         posicoesRecontagem,
         posicoesEmAndamento,
-        acuracidade: acuracidade.toFixed(2),
-        percentualItensContados: percentualItensContados.toFixed(2),
         percentualPosicoesContadas: percentualPosicoesContadas.toFixed(2)
       },
       top10Divergentes,
@@ -270,6 +324,7 @@ async function inventoryHistoryReport(req, res) {
     const result = await pool.query(
       `SELECT
         p.codigo AS posicao,
+        p.status AS status_posicao,
         p.primeiro_operador,
         p.segundo_operador,
         p.terceiro_operador,
