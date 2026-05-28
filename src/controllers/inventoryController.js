@@ -71,8 +71,8 @@ async function uploadInventory(req, res) {
     const nomeInventario = `Inventário ${dataInventario}`
 
     const inventarioResult = await client.query(
-      `INSERT INTO inventarios (nome, cliente, deposito, data_inicio)
-       VALUES ($1, $2, $3, $4)
+      `INSERT INTO inventarios (nome, cliente, deposito, data_inicio, status, arquivado)
+       VALUES ($1, $2, $3, $4, 'aberto', false)
        RETURNING id, nome, data_inicio`,
       [nomeInventario, cliente, deposito, dataInventario]
     )
@@ -130,7 +130,6 @@ async function uploadInventory(req, res) {
     })
   } catch (error) {
     await client.query("ROLLBACK")
-    console.error(error)
 
     return res.status(500).json({
       error: "Erro ao importar inventário",
@@ -155,15 +154,16 @@ async function listInventories(req, res) {
         deposito,
         data_inicio,
         data_criacao,
-        status
+        finalizado_em,
+        status,
+        arquivado
       FROM inventarios
+      WHERE data_inicio >= NOW() - INTERVAL '1 year'
       ORDER BY data_inicio DESC, id DESC`
     )
 
     return res.json(result.rows)
   } catch (error) {
-    console.error(error)
-
     return res.status(500).json({
       error: "Erro ao listar inventários",
       details: error.message
@@ -171,7 +171,65 @@ async function listInventories(req, res) {
   }
 }
 
+async function finishInventory(req, res) {
+  try {
+    const { inventarioId } = req.params
+
+    const result = await pool.query(
+      `UPDATE inventarios
+       SET status = 'finalizado',
+           arquivado = true,
+           finalizado_em = NOW()
+       WHERE id = $1
+       RETURNING *`,
+      [inventarioId]
+    )
+
+    if (result.rowCount === 0) {
+      return res.status(404).json({ error: "Inventário não encontrado" })
+    }
+
+    return res.json({
+      message: "Inventário finalizado e arquivado no histórico",
+      inventory: result.rows[0]
+    })
+  } catch (error) {
+    return res.status(500).json({
+      error: "Erro ao finalizar inventário",
+      details: error.message
+    })
+  }
+}
+
+async function deleteInventory(req, res) {
+  try {
+    const { inventarioId } = req.params
+
+    const result = await pool.query(
+      `DELETE FROM inventarios
+       WHERE id = $1
+       RETURNING id`,
+      [inventarioId]
+    )
+
+    if (result.rowCount === 0) {
+      return res.status(404).json({ error: "Inventário não encontrado" })
+    }
+
+    return res.json({
+      message: "Inventário excluído com sucesso"
+    })
+  } catch (error) {
+    return res.status(500).json({
+      error: "Erro ao excluir inventário",
+      details: error.message
+    })
+  }
+}
+
 module.exports = {
   uploadInventory,
-  listInventories
+  listInventories,
+  finishInventory,
+  deleteInventory
 }

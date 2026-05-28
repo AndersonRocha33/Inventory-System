@@ -4,7 +4,9 @@ const fs = require("fs")
 const path = require("path")
 const {
   uploadInventory,
-  listInventories
+  listInventories,
+  finishInventory,
+  deleteInventory
 } = require("../controllers/inventoryController")
 
 const router = express.Router()
@@ -29,5 +31,7 @@ const upload = multer({ storage })
 
 router.get("/", listInventories)
 router.post("/upload", upload.single("file"), uploadInventory)
+router.post("/:inventarioId/finish", finishInventory)
+router.delete("/:inventarioId", deleteInventory)
 
 module.exports = router
