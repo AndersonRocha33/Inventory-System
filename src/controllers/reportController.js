@@ -16,8 +16,10 @@ grouped AS (
   SELECT
     p.codigo AS posicao,
     p.status AS status_posicao,
+    p.observacao AS observacao_posicao,
     i.sku,
     MAX(i.descricao) AS descricao,
+    BOOL_OR(i.encontrado_a_mais) AS encontrado_a_mais,
     SUM(COALESCE(i.quantidade_sistema, 0))::integer AS quantidade_sistema,
     SUM(COALESCE(i.quantidade_final, lc.quantidade_contada, 0))::integer AS quantidade_contada
   FROM itens i
@@ -26,13 +28,15 @@ grouped AS (
     ON lc.item_id = i.id
    AND lc.rn = 1
   WHERE p.inventario_id = $1
-  GROUP BY p.codigo, p.status, i.sku
+  GROUP BY p.codigo, p.status, p.observacao, i.sku
 )
 SELECT
   posicao,
   status_posicao,
+  observacao_posicao,
   sku,
   descricao,
+  encontrado_a_mais,
   quantidade_sistema,
   quantidade_contada,
   (quantidade_contada - quantidade_sistema) AS diferenca
@@ -58,8 +62,10 @@ async function positionReport(req, res) {
       SELECT
         p.codigo AS posicao,
         p.status AS status_posicao,
+        p.observacao AS observacao_posicao,
         i.sku,
         i.descricao,
+        i.encontrado_a_mais,
         i.quantidade_sistema::integer AS quantidade_sistema,
         COALESCE(i.quantidade_final, lc.quantidade_contada, 0)::integer AS quantidade_contada,
         (COALESCE(i.quantidade_final, lc.quantidade_contada, 0) - i.quantidade_sistema)::integer AS diferenca
@@ -75,7 +81,6 @@ async function positionReport(req, res) {
 
     return res.json(result.rows)
   } catch (error) {
-    console.error(error)
     return res.status(500).json({
       error: "Erro ao gerar relatório da posição",
       details: error.message
@@ -102,21 +107,10 @@ async function inventoryReport(req, res) {
     const totalItens = rows.length
     const totalPosicoes = positions.length
 
-    const posicoesFinalizadas = positions.filter(
-      (position) => position.status === "finalizado"
-    ).length
-
-    const posicoesRecontagem = positions.filter(
-      (position) => position.status === "recontagem"
-    ).length
-
-    const posicoesEmAndamento = positions.filter(
-      (position) => position.status === "contando"
-    ).length
-
-    const posicoesPendentes = positions.filter(
-      (position) => position.status === "pendente"
-    ).length
+    const posicoesFinalizadas = positions.filter((p) => p.status === "finalizado").length
+    const posicoesRecontagem = positions.filter((p) => p.status === "recontagem").length
+    const posicoesEmAndamento = positions.filter((p) => p.status === "contando").length
+    const posicoesPendentes = positions.filter((p) => p.status === "pendente").length
 
     const itensContados = rows.filter((item) =>
       Number(item.quantidade_contada) > 0 ||
@@ -130,10 +124,7 @@ async function inventoryReport(req, res) {
     const percentualPosicoesContadas =
       totalPosicoes > 0 ? (posicoesFinalizadas / totalPosicoes) * 100 : 0
 
-    const itensAvaliados = rows.filter(
-      (item) => item.status_posicao === "finalizado"
-    )
-
+    const itensAvaliados = rows.filter((item) => item.status_posicao === "finalizado")
     const totalItensAvaliados = itensAvaliados.length
 
     const itensCorretosAvaliados = itensAvaliados.filter(
@@ -149,43 +140,10 @@ async function inventoryReport(req, res) {
         ? (itensCorretosAvaliados.length / totalItensAvaliados) * 100
         : 0
 
-    const itensDivergentesGeral = rows.filter(
-      (item) =>
-        item.status_posicao === "finalizado" &&
-        Number(item.quantidade_sistema) !== Number(item.quantidade_contada)
+    const itensExtras = rows.filter((item) => item.encontrado_a_mais === true)
+    const itensExtrasFinalizados = itensExtras.filter(
+      (item) => item.status_posicao === "finalizado"
     )
-
-    const top10Divergentes = itensDivergentesGeral
-      .map((item) => ({
-        ...item,
-        diferencaAbsoluta: Math.abs(
-          Number(item.quantidade_contada) - Number(item.quantidade_sistema)
-        )
-      }))
-      .sort((a, b) => b.diferencaAbsoluta - a.diferencaAbsoluta)
-      .slice(0, 10)
-
-    const divergenciaPorSkuMap = new Map()
-
-    for (const item of itensDivergentesGeral) {
-      const key = `${item.sku}||${item.descricao}`
-
-      const atual = divergenciaPorSkuMap.get(key) || {
-        sku: item.sku,
-        descricao: item.descricao,
-        divergenciaTotal: 0
-      }
-
-      atual.divergenciaTotal += Math.abs(
-        Number(item.quantidade_contada) - Number(item.quantidade_sistema)
-      )
-
-      divergenciaPorSkuMap.set(key, atual)
-    }
-
-    const graficoDivergencias = Array.from(divergenciaPorSkuMap.values())
-      .sort((a, b) => b.divergenciaTotal - a.divergenciaTotal)
-      .slice(0, 10)
 
     const operatorResult = await pool.query(
       `WITH item_base AS (
@@ -239,15 +197,12 @@ async function inventoryReport(req, res) {
       const corretas = Number(row.contagens_corretas || 0)
       const divergentes = Number(row.contagens_divergentes || 0)
 
-      const percentualAcerto =
-        total > 0 ? ((corretas / total) * 100).toFixed(2) : "0.00"
-
       return {
         operador: row.operador,
         totalContagens: total,
         contagensCorretas: corretas,
         contagensDivergentes: divergentes,
-        percentualAcerto
+        percentualAcerto: total > 0 ? ((corretas / total) * 100).toFixed(2) : "0.00"
       }
     })
 
@@ -263,6 +218,9 @@ async function inventoryReport(req, res) {
         itensCorretosAvaliados: itensCorretosAvaliados.length,
         itensDivergentesAvaliados: itensDivergentesAvaliados.length,
 
+        itensExtras: itensExtras.length,
+        itensExtrasFinalizados: itensExtrasFinalizados.length,
+
         totalPosicoes,
         posicoesFinalizadas,
         posicoesPendentes,
@@ -270,13 +228,10 @@ async function inventoryReport(req, res) {
         posicoesEmAndamento,
         percentualPosicoesContadas: percentualPosicoesContadas.toFixed(2)
       },
-      top10Divergentes,
-      graficoDivergencias,
       rankingOperadores,
       dados: rows
     })
   } catch (error) {
-    console.error(error)
     return res.status(500).json({
       error: "Erro ao gerar relatório",
       details: error.message
@@ -294,8 +249,10 @@ async function exportInventoryCSV(req, res) {
       fields: [
         "posicao",
         "status_posicao",
+        "observacao_posicao",
         "sku",
         "descricao",
+        "encontrado_a_mais",
         "quantidade_sistema",
         "quantidade_contada",
         "diferenca"
@@ -309,7 +266,6 @@ async function exportInventoryCSV(req, res) {
 
     return res.send(csv)
   } catch (error) {
-    console.error(error)
     return res.status(500).json({
       error: "Erro ao exportar CSV",
       details: error.message
@@ -325,11 +281,13 @@ async function inventoryHistoryReport(req, res) {
       `SELECT
         p.codigo AS posicao,
         p.status AS status_posicao,
+        p.observacao AS observacao_posicao,
         p.primeiro_operador,
         p.segundo_operador,
         p.terceiro_operador,
         i.sku,
         i.descricao,
+        i.encontrado_a_mais,
         i.quantidade_sistema::integer AS quantidade_sistema,
         (
           SELECT c.quantidade_contada::integer
@@ -364,7 +322,6 @@ async function inventoryHistoryReport(req, res) {
 
     return res.json(result.rows)
   } catch (error) {
-    console.error(error)
     return res.status(500).json({
       error: "Erro ao gerar relatório histórico",
       details: error.message

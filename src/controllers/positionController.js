@@ -4,10 +4,9 @@ const { resolveItemUpToPhase } = require("../services/countResolutionService")
 async function listPositions(req, res) {
   try {
     const { inventarioId } = req.params
-    const { operador } = req.query
 
-    let query = `
-      SELECT
+    const result = await pool.query(
+      `SELECT
         id,
         codigo,
         status,
@@ -16,41 +15,17 @@ async function listPositions(req, res) {
         segundo_operador,
         terceiro_operador,
         fase_atual,
+        observacao,
         data_inicio,
         data_fim
       FROM posicoes
       WHERE inventario_id = $1
-    `
-
-    const params = [inventarioId]
-
-    if (operador) {
-      params.push(operador.trim())
-
-      query += `
-        AND NOT (
-          fase_atual = 2
-          AND primeiro_operador = $2
-          AND status = 'recontagem'
-        )
-        AND NOT (
-          fase_atual = 3
-          AND (
-            primeiro_operador = $2
-            OR segundo_operador = $2
-          )
-          AND status = 'recontagem'
-        )
-      `
-    }
-
-    query += ` ORDER BY codigo`
-
-    const result = await pool.query(query, params)
+      ORDER BY codigo`,
+      [inventarioId]
+    )
 
     return res.json(result.rows)
   } catch (error) {
-    console.error(error)
     return res.status(500).json({
       error: "Erro ao listar posições",
       details: error.message
@@ -78,7 +53,8 @@ async function startCounting(req, res) {
         primeiro_operador,
         segundo_operador,
         terceiro_operador,
-        fase_atual
+        fase_atual,
+        observacao
        FROM posicoes
        WHERE id = $1`,
       [positionId]
@@ -144,6 +120,7 @@ async function startCounting(req, res) {
          segundo_operador,
          terceiro_operador,
          fase_atual,
+         observacao,
          data_inicio`,
       [nomeOperador, positionId]
     )
@@ -153,7 +130,6 @@ async function startCounting(req, res) {
       position: result.rows[0]
     })
   } catch (error) {
-    console.error(error)
     return res.status(500).json({
       error: "Erro ao iniciar contagem",
       details: error.message
@@ -199,27 +175,27 @@ async function finishCounting(req, res) {
         i.descricao,
         i.quantidade_sistema,
         i.encontrado_a_mais,
-        COALESCE((
+        (
           SELECT c.quantidade_contada
           FROM contagens c
           WHERE c.item_id = i.id AND c.fase = 1
           ORDER BY c.data_contagem DESC, c.id DESC
           LIMIT 1
-        ), NULL) AS q1,
-        COALESCE((
+        ) AS q1,
+        (
           SELECT c.quantidade_contada
           FROM contagens c
           WHERE c.item_id = i.id AND c.fase = 2
           ORDER BY c.data_contagem DESC, c.id DESC
           LIMIT 1
-        ), NULL) AS q2,
-        COALESCE((
+        ) AS q2,
+        (
           SELECT c.quantidade_contada
           FROM contagens c
           WHERE c.item_id = i.id AND c.fase = 3
           ORDER BY c.data_contagem DESC, c.id DESC
           LIMIT 1
-        ), NULL) AS q3
+        ) AS q3
       FROM itens i
       WHERE i.posicao_id = $1`,
       [positionId]
@@ -283,6 +259,7 @@ async function finishCounting(req, res) {
          segundo_operador,
          terceiro_operador,
          fase_atual,
+         observacao,
          data_inicio,
          data_fim`,
       [novoStatus, novaFase, positionId]
@@ -297,7 +274,9 @@ async function finishCounting(req, res) {
     } else if (unresolvedItems.length > 0 && faseAtual === 2) {
       message = "Posição enviada para segunda recontagem"
     } else if (faseAtual === 3) {
-      const pendenciasFinais = analyzedItems.filter((item) => !item.resolution.resolved)
+      const pendenciasFinais = analyzedItems.filter(
+        (item) => !item.resolution.resolved
+      )
 
       if (pendenciasFinais.length > 0) {
         message = "Posição finalizada após terceira contagem, mas ainda sem consenso em alguns itens"
@@ -315,7 +294,7 @@ async function finishCounting(req, res) {
     })
   } catch (error) {
     await client.query("ROLLBACK")
-    console.error(error)
+
     return res.status(500).json({
       error: "Erro ao finalizar contagem",
       details: error.message
@@ -325,8 +304,38 @@ async function finishCounting(req, res) {
   }
 }
 
+async function updatePositionObservation(req, res) {
+  try {
+    const { positionId } = req.params
+    const { observacao } = req.body || {}
+
+    const result = await pool.query(
+      `UPDATE posicoes
+       SET observacao = $1
+       WHERE id = $2
+       RETURNING id, codigo, observacao`,
+      [observacao || "", positionId]
+    )
+
+    if (result.rowCount === 0) {
+      return res.status(404).json({ error: "Posição não encontrada" })
+    }
+
+    return res.json({
+      message: "Observação salva com sucesso",
+      position: result.rows[0]
+    })
+  } catch (error) {
+    return res.status(500).json({
+      error: "Erro ao salvar observação",
+      details: error.message
+    })
+  }
+}
+
 module.exports = {
   listPositions,
   startCounting,
-  finishCounting
+  finishCounting,
+  updatePositionObservation
 }
