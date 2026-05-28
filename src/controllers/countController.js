@@ -6,22 +6,15 @@ async function listItemsByPosition(req, res) {
     const { positionId } = req.params
 
     const result = await pool.query(
-      `SELECT
-        id,
-        sku,
-        descricao,
-        lote,
-        validade,
-        encontrado_a_mais
-      FROM itens
-      WHERE posicao_id = $1
-      ORDER BY descricao`,
+      `SELECT id, sku, descricao, lote, validade, encontrado_a_mais
+       FROM itens
+       WHERE posicao_id = $1
+       ORDER BY descricao`,
       [positionId]
     )
 
     return res.json(result.rows)
   } catch (error) {
-    console.error(error)
     return res.status(500).json({
       error: "Erro ao listar itens da posição",
       details: error.message
@@ -34,9 +27,7 @@ async function listDivergentItemsByPosition(req, res) {
     const { positionId } = req.params
 
     const positionResult = await pool.query(
-      `SELECT fase_atual
-       FROM posicoes
-       WHERE id = $1`,
+      `SELECT fase_atual FROM posicoes WHERE id = $1`,
       [positionId]
     )
 
@@ -47,9 +38,7 @@ async function listDivergentItemsByPosition(req, res) {
     const faseAtual = Number(positionResult.rows[0].fase_atual || 1)
     const faseAnterior = faseAtual - 1
 
-    if (faseAnterior < 1) {
-      return res.json([])
-    }
+    if (faseAnterior < 1) return res.json([])
 
     const result = await pool.query(
       `SELECT
@@ -60,27 +49,9 @@ async function listDivergentItemsByPosition(req, res) {
         i.validade,
         i.quantidade_sistema,
         i.encontrado_a_mais,
-        COALESCE((
-          SELECT c.quantidade_contada
-          FROM contagens c
-          WHERE c.item_id = i.id AND c.fase = 1
-          ORDER BY c.data_contagem DESC, c.id DESC
-          LIMIT 1
-        ), NULL) AS q1,
-        COALESCE((
-          SELECT c.quantidade_contada
-          FROM contagens c
-          WHERE c.item_id = i.id AND c.fase = 2
-          ORDER BY c.data_contagem DESC, c.id DESC
-          LIMIT 1
-        ), NULL) AS q2,
-        COALESCE((
-          SELECT c.quantidade_contada
-          FROM contagens c
-          WHERE c.item_id = i.id AND c.fase = 3
-          ORDER BY c.data_contagem DESC, c.id DESC
-          LIMIT 1
-        ), NULL) AS q3
+        (SELECT c.quantidade_contada FROM contagens c WHERE c.item_id = i.id AND c.fase = 1 ORDER BY c.data_contagem DESC, c.id DESC LIMIT 1) AS q1,
+        (SELECT c.quantidade_contada FROM contagens c WHERE c.item_id = i.id AND c.fase = 2 ORDER BY c.data_contagem DESC, c.id DESC LIMIT 1) AS q2,
+        (SELECT c.quantidade_contada FROM contagens c WHERE c.item_id = i.id AND c.fase = 3 ORDER BY c.data_contagem DESC, c.id DESC LIMIT 1) AS q3
       FROM itens i
       WHERE i.posicao_id = $1`,
       [positionId]
@@ -93,7 +64,6 @@ async function listDivergentItemsByPosition(req, res) {
 
     return res.json(divergentes)
   } catch (error) {
-    console.error(error)
     return res.status(500).json({
       error: "Erro ao listar itens divergentes",
       details: error.message
@@ -104,11 +74,10 @@ async function listDivergentItemsByPosition(req, res) {
 async function listSavedItemsByPosition(req, res) {
   try {
     const { positionId } = req.params
+    const faseQuery = req.query.fase
 
     const positionResult = await pool.query(
-      `SELECT fase_atual
-       FROM posicoes
-       WHERE id = $1`,
+      `SELECT fase_atual FROM posicoes WHERE id = $1`,
       [positionId]
     )
 
@@ -117,6 +86,7 @@ async function listSavedItemsByPosition(req, res) {
     }
 
     const faseAtual = Number(positionResult.rows[0].fase_atual || 1)
+    const fase = faseQuery ? Number(faseQuery) : faseAtual
 
     const result = await pool.query(
       `SELECT
@@ -127,6 +97,7 @@ async function listSavedItemsByPosition(req, res) {
         i.validade,
         c.quantidade_contada,
         c.operador,
+        c.fase,
         c.data_contagem
       FROM itens i
       JOIN LATERAL (
@@ -139,12 +110,11 @@ async function listSavedItemsByPosition(req, res) {
       ) c ON true
       WHERE i.posicao_id = $1
       ORDER BY i.descricao`,
-      [positionId, faseAtual]
+      [positionId, fase]
     )
 
     return res.json(result.rows)
   } catch (error) {
-    console.error(error)
     return res.status(500).json({
       error: "Erro ao listar itens salvos",
       details: error.message
@@ -155,7 +125,7 @@ async function listSavedItemsByPosition(req, res) {
 async function registerCount(req, res) {
   try {
     const { itemId } = req.params
-    const { operador, quantidade, tipo } = req.body || {}
+    const { operador, quantidade, tipo, fase } = req.body || {}
 
     if (!operador || !operador.trim()) {
       return res.status(400).json({ error: "Operador é obrigatório" })
@@ -166,10 +136,7 @@ async function registerCount(req, res) {
     }
 
     const itemResult = await pool.query(
-      `SELECT
-        i.id,
-        i.posicao_id,
-        p.fase_atual
+      `SELECT i.id, i.posicao_id, p.fase_atual
        FROM itens i
        JOIN posicoes p ON p.id = i.posicao_id
        WHERE i.id = $1`,
@@ -181,7 +148,7 @@ async function registerCount(req, res) {
     }
 
     const item = itemResult.rows[0]
-    const faseAtual = Number(item.fase_atual || 1)
+    const faseAtual = Number(fase || item.fase_atual || 1)
 
     const result = await pool.query(
       `INSERT INTO contagens (
@@ -209,7 +176,6 @@ async function registerCount(req, res) {
       count: result.rows[0]
     })
   } catch (error) {
-    console.error(error)
     return res.status(500).json({
       error: "Erro ao registrar contagem",
       details: error.message
@@ -229,9 +195,7 @@ async function addExtraItem(req, res) {
     }
 
     const positionResult = await pool.query(
-      `SELECT fase_atual
-       FROM posicoes
-       WHERE id = $1`,
+      `SELECT fase_atual FROM posicoes WHERE id = $1`,
       [positionId]
     )
 
@@ -280,7 +244,6 @@ async function addExtraItem(req, res) {
       item
     })
   } catch (error) {
-    console.error(error)
     return res.status(500).json({
       error: "Erro ao adicionar item extra",
       details: error.message
