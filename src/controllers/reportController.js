@@ -249,30 +249,263 @@ async function inventoryReport(req, res) {
   }
 }
 
+function csvEscape(value) {
+  if (value === null || value === undefined) return ""
+
+  const stringValue = String(value).replace(/"/g, '""')
+
+  return `"${stringValue}"`
+}
+
+function toCsvLine(values) {
+  return values.map(csvEscape).join(";")
+}
+
 async function exportInventoryCSV(req, res) {
   try {
     const { inventarioId } = req.params
 
-    const result = await pool.query(REPORT_QUERY_BY_INVENTORY, [inventarioId])
+    const reportResult = await pool.query(REPORT_QUERY_BY_INVENTORY, [inventarioId])
+    const rows = reportResult.rows
 
-    const parser = new Parser({
-      fields: [
-        "posicao",
-        "status_posicao",
-        "observacao_posicao",
-        "sku",
-        "descricao",
-        "encontrado_a_mais",
-        "quantidade_sistema",
-        "quantidade_contada",
-        "diferenca"
-      ]
-    })
+    const historyResult = await pool.query(
+      `SELECT
+        p.codigo AS posicao,
+        p.status AS status_posicao,
+        p.observacao AS observacao_posicao,
+        p.primeiro_operador,
+        p.segundo_operador,
+        p.terceiro_operador,
+        i.sku,
+        i.descricao,
+        i.encontrado_a_mais,
+        i.quantidade_sistema::integer AS quantidade_sistema,
+        (
+          SELECT c.quantidade_contada::integer
+          FROM contagens c
+          WHERE c.item_id = i.id AND c.fase = 1
+          ORDER BY c.data_contagem DESC, c.id DESC
+          LIMIT 1
+        ) AS q1,
+        (
+          SELECT c.quantidade_contada::integer
+          FROM contagens c
+          WHERE c.item_id = i.id AND c.fase = 2
+          ORDER BY c.data_contagem DESC, c.id DESC
+          LIMIT 1
+        ) AS q2,
+        (
+          SELECT c.quantidade_contada::integer
+          FROM contagens c
+          WHERE c.item_id = i.id AND c.fase = 3
+          ORDER BY c.data_contagem DESC, c.id DESC
+          LIMIT 1
+        ) AS q3,
+        i.quantidade_final::integer AS quantidade_final,
+        i.criterio_fechamento,
+        i.resolvido
+      FROM itens i
+      JOIN posicoes p ON p.id = i.posicao_id
+      WHERE p.inventario_id = $1
+      ORDER BY p.codigo, i.sku`,
+      [inventarioId]
+    )
 
-    const csv = parser.parse(result.rows)
+    const auditResult = await pool.query(
+      `SELECT
+        a.id,
+        p.codigo AS posicao,
+        i.sku,
+        i.descricao,
+        a.operador,
+        a.fase,
+        a.quantidade_anterior,
+        a.quantidade_nova,
+        a.acao,
+        a.data_alteracao
+      FROM auditoria_contagens a
+      LEFT JOIN itens i ON i.id = a.item_id
+      LEFT JOIN posicoes p ON p.id = a.posicao_id
+      WHERE a.inventario_id = $1
+      ORDER BY a.data_alteracao DESC, a.id DESC`,
+      [inventarioId]
+    )
+
+    const itensFinalizados = rows.filter(
+      (item) => item.status_posicao === "finalizado"
+    )
+
+    const itensCorretos = itensFinalizados.filter(
+      (item) => Number(item.quantidade_sistema) === Number(item.quantidade_contada)
+    ).length
+
+    const itensDivergentes = itensFinalizados.filter(
+      (item) => Number(item.quantidade_sistema) !== Number(item.quantidade_contada)
+    ).length
+
+    const itensAvaliados = itensCorretos + itensDivergentes
+
+    const acuracidade =
+      itensAvaliados > 0
+        ? ((itensCorretos / itensAvaliados) * 100).toFixed(2)
+        : "0.00"
+
+    const lines = []
+
+    lines.push(toCsvLine(["RESUMO"]))
+    lines.push(toCsvLine(["Indicador", "Valor"]))
+    lines.push(toCsvLine(["Total de itens", rows.length]))
+    lines.push(toCsvLine(["Itens avaliados", itensAvaliados]))
+    lines.push(toCsvLine(["Itens corretos", itensCorretos]))
+    lines.push(toCsvLine(["Itens divergentes", itensDivergentes]))
+    lines.push(toCsvLine(["Acuracidade", `${acuracidade}%`]))
+    lines.push("")
+
+    lines.push(toCsvLine(["ITENS"]))
+    lines.push(
+      toCsvLine([
+        "Posição",
+        "Status",
+        "SKU",
+        "Descrição",
+        "Sistema",
+        "Contada",
+        "Diferença",
+        "Extra",
+        "Observação posição"
+      ])
+    )
+
+    for (const item of rows) {
+      lines.push(
+        toCsvLine([
+          item.posicao,
+          item.status_posicao,
+          item.sku,
+          item.descricao,
+          item.quantidade_sistema,
+          item.quantidade_contada,
+          item.diferenca,
+          item.encontrado_a_mais ? "Sim" : "Não",
+          item.observacao_posicao
+        ])
+      )
+    }
+
+    lines.push("")
+    lines.push(toCsvLine(["DIVERGÊNCIAS"]))
+    lines.push(
+      toCsvLine([
+        "Posição",
+        "Status",
+        "SKU",
+        "Descrição",
+        "Sistema",
+        "Contada",
+        "Diferença",
+        "Extra",
+        "Observação posição"
+      ])
+    )
+
+    for (const item of rows.filter((row) => Number(row.diferenca) !== 0)) {
+      lines.push(
+        toCsvLine([
+          item.posicao,
+          item.status_posicao,
+          item.sku,
+          item.descricao,
+          item.quantidade_sistema,
+          item.quantidade_contada,
+          item.diferenca,
+          item.encontrado_a_mais ? "Sim" : "Não",
+          item.observacao_posicao
+        ])
+      )
+    }
+
+    lines.push("")
+    lines.push(toCsvLine(["HISTÓRICO"]))
+    lines.push(
+      toCsvLine([
+        "Posição",
+        "Status",
+        "SKU",
+        "Descrição",
+        "Sistema",
+        "Q1",
+        "Q2",
+        "Q3",
+        "Final",
+        "Critério",
+        "Resolvido",
+        "1º Operador",
+        "2º Operador",
+        "3º Operador",
+        "Observação posição"
+      ])
+    )
+
+    for (const item of historyResult.rows) {
+      lines.push(
+        toCsvLine([
+          item.posicao,
+          item.status_posicao,
+          item.sku,
+          item.descricao,
+          item.quantidade_sistema,
+          item.q1,
+          item.q2,
+          item.q3,
+          item.quantidade_final,
+          item.criterio_fechamento,
+          item.resolvido ? "Sim" : "Não",
+          item.primeiro_operador,
+          item.segundo_operador,
+          item.terceiro_operador,
+          item.observacao_posicao
+        ])
+      )
+    }
+
+    lines.push("")
+    lines.push(toCsvLine(["AUDITORIA"]))
+    lines.push(
+      toCsvLine([
+        "ID",
+        "Posição",
+        "SKU",
+        "Descrição",
+        "Operador",
+        "Fase",
+        "Qtd anterior",
+        "Qtd nova",
+        "Ação",
+        "Data alteração"
+      ])
+    )
+
+    for (const item of auditResult.rows) {
+      lines.push(
+        toCsvLine([
+          item.id,
+          item.posicao,
+          item.sku,
+          item.descricao,
+          item.operador,
+          item.fase,
+          item.quantidade_anterior,
+          item.quantidade_nova,
+          item.acao,
+          item.data_alteracao
+        ])
+      )
+    }
+
+    const csv = "\uFEFF" + lines.join("\n")
 
     res.header("Content-Type", "text/csv; charset=utf-8")
-    res.attachment("inventario.csv")
+    res.attachment(`inventario-${inventarioId}.csv`)
 
     return res.send(csv)
   } catch (error) {
