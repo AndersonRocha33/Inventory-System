@@ -140,7 +140,14 @@ async function inventoryReport(req, res) {
         ? (itensCorretosAvaliados.length / totalItensAvaliados) * 100
         : 0
 
+    const projecaoFinal = acuracidadeAtual
+
+    const divergenciasAbertas = rows.filter(
+      (item) => item.status_posicao === "recontagem"
+    ).length
+
     const itensExtras = rows.filter((item) => item.encontrado_a_mais === true)
+
     const itensExtrasFinalizados = itensExtras.filter(
       (item) => item.status_posicao === "finalizado"
     )
@@ -209,6 +216,8 @@ async function inventoryReport(req, res) {
     return res.json({
       resumo: {
         acuracidadeAtual: acuracidadeAtual.toFixed(2),
+        projecaoFinal: projecaoFinal.toFixed(2),
+        divergenciasAbertas,
 
         totalItens,
         itensContados,
