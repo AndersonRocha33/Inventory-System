@@ -6,6 +6,7 @@ const {
   uploadInventory,
   listInventories,
   finishInventory,
+  reopenInventory,
   deleteInventory
 } = require("../controllers/inventoryController")
 
@@ -32,6 +33,7 @@ const upload = multer({ storage })
 router.get("/", listInventories)
 router.post("/upload", upload.single("file"), uploadInventory)
 router.post("/:inventarioId/finish", finishInventory)
+router.post("/:inventarioId/reopen", reopenInventory)
 router.delete("/:inventarioId", deleteInventory)
 
 module.exports = router
