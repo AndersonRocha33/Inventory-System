@@ -123,6 +123,8 @@ async function listSavedItemsByPosition(req, res) {
 }
 
 async function registerCount(req, res) {
+  const client = await pool.connect()
+
   try {
     const { itemId } = req.params
     const { operador, quantidade, tipo, fase } = req.body || {}
@@ -131,12 +133,22 @@ async function registerCount(req, res) {
       return res.status(400).json({ error: "Operador é obrigatório" })
     }
 
-    if (quantidade === undefined || quantidade === null || Number.isNaN(Number(quantidade))) {
+    if (
+      quantidade === undefined ||
+      quantidade === null ||
+      Number.isNaN(Number(quantidade))
+    ) {
       return res.status(400).json({ error: "Quantidade inválida" })
     }
 
-    const itemResult = await pool.query(
-      `SELECT i.id, i.posicao_id, p.fase_atual
+    await client.query("BEGIN")
+
+    const itemResult = await client.query(
+      `SELECT
+        i.id,
+        i.posicao_id,
+        p.inventario_id,
+        p.fase_atual
        FROM itens i
        JOIN posicoes p ON p.id = i.posicao_id
        WHERE i.id = $1`,
@@ -144,13 +156,28 @@ async function registerCount(req, res) {
     )
 
     if (itemResult.rowCount === 0) {
+      await client.query("ROLLBACK")
       return res.status(404).json({ error: "Item não encontrado" })
     }
 
     const item = itemResult.rows[0]
     const faseAtual = Number(fase || item.fase_atual || 1)
 
-    const result = await pool.query(
+    const previousResult = await client.query(
+      `SELECT quantidade_contada
+       FROM contagens
+       WHERE item_id = $1 AND fase = $2
+       ORDER BY data_contagem DESC, id DESC
+       LIMIT 1`,
+      [item.id, faseAtual]
+    )
+
+    const quantidadeAnterior =
+      previousResult.rowCount > 0
+        ? Number(previousResult.rows[0].quantidade_contada)
+        : null
+
+    const result = await client.query(
       `INSERT INTO contagens (
         item_id,
         posicao_id,
@@ -171,15 +198,44 @@ async function registerCount(req, res) {
       ]
     )
 
+    await client.query(
+      `INSERT INTO auditoria_contagens (
+        item_id,
+        posicao_id,
+        inventario_id,
+        operador,
+        fase,
+        quantidade_anterior,
+        quantidade_nova,
+        acao
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+      [
+        item.id,
+        item.posicao_id,
+        item.inventario_id,
+        operador.trim(),
+        faseAtual,
+        quantidadeAnterior,
+        Number(quantidade),
+        quantidadeAnterior === null ? "CRIACAO_CONTAGEM" : "ALTERACAO_CONTAGEM"
+      ]
+    )
+
+    await client.query("COMMIT")
+
     return res.status(201).json({
       message: "Contagem registrada com sucesso",
       count: result.rows[0]
     })
   } catch (error) {
+    await client.query("ROLLBACK")
+
     return res.status(500).json({
       error: "Erro ao registrar contagem",
       details: error.message
     })
+  } finally {
+    client.release()
   }
 }
 
