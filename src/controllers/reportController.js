@@ -29,6 +29,7 @@ grouped AS (
     ON lc.item_id = i.id
    AND lc.rn = 1
   WHERE p.inventario_id = $1
+    AND COALESCE(p.incluida_no_inventario, true) = true
   GROUP BY p.codigo, p.status, p.observacao, i.sku
 )
 SELECT
@@ -99,7 +100,8 @@ async function inventoryReport(req, res) {
     const positionsResult = await pool.query(
       `SELECT id, codigo, status
        FROM posicoes
-       WHERE inventario_id = $1`,
+       WHERE inventario_id = $1
+         AND COALESCE(incluida_no_inventario, true) = true`,
       [inventarioId]
     )
 
@@ -156,6 +158,7 @@ async function inventoryReport(req, res) {
          FROM itens i
          JOIN posicoes p ON p.id = i.posicao_id
          WHERE p.inventario_id = $1
+           AND COALESCE(p.incluida_no_inventario, true) = true
        ),
        last_count_per_phase AS (
          SELECT
@@ -203,6 +206,7 @@ async function inventoryReport(req, res) {
        JOIN itens i ON i.id = c.item_id
        JOIN posicoes p ON p.id = i.posicao_id
        WHERE p.inventario_id = $1
+         AND COALESCE(p.incluida_no_inventario, true) = true
          AND c.data_contagem >= NOW() - INTERVAL '1 hour'`,
       [inventarioId]
     )
@@ -213,6 +217,7 @@ async function inventoryReport(req, res) {
        JOIN itens i ON i.id = c.item_id
        JOIN posicoes p ON p.id = i.posicao_id
        WHERE p.inventario_id = $1
+         AND COALESCE(p.incluida_no_inventario, true) = true
          AND c.data_contagem >= NOW() - INTERVAL '30 minutes'`,
       [inventarioId]
     )
@@ -415,6 +420,7 @@ async function inventoryHistoryReport(req, res) {
       FROM itens i
       JOIN posicoes p ON p.id = i.posicao_id
       WHERE p.inventario_id = $1
+        AND COALESCE(p.incluida_no_inventario, true) = true
       ORDER BY p.codigo, i.sku`,
       [inventarioId]
     )
@@ -448,6 +454,7 @@ async function auditReport(req, res) {
       LEFT JOIN itens i ON i.id = a.item_id
       LEFT JOIN posicoes p ON p.id = a.posicao_id
       WHERE a.inventario_id = $1
+        AND COALESCE(p.incluida_no_inventario, true) = true
       ORDER BY a.data_alteracao DESC, a.id DESC`,
       [inventarioId]
     )

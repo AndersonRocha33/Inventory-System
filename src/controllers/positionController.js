@@ -16,10 +16,12 @@ async function listPositions(req, res) {
         terceiro_operador,
         fase_atual,
         observacao,
+        incluida_no_inventario,
         data_inicio,
         data_fim
       FROM posicoes
       WHERE inventario_id = $1
+        AND COALESCE(incluida_no_inventario, true) = true
       ORDER BY codigo`,
       [inventarioId]
     )
@@ -30,6 +32,81 @@ async function listPositions(req, res) {
       error: "Erro ao listar posições",
       details: error.message
     })
+  }
+}
+
+async function listAllPositions(req, res) {
+  try {
+    const { inventarioId } = req.params
+
+    const result = await pool.query(
+      `SELECT
+        id,
+        codigo,
+        status,
+        incluida_no_inventario
+      FROM posicoes
+      WHERE inventario_id = $1
+      ORDER BY codigo`,
+      [inventarioId]
+    )
+
+    return res.json(result.rows)
+  } catch (error) {
+    return res.status(500).json({
+      error: "Erro ao listar todas as posições",
+      details: error.message
+    })
+  }
+}
+
+async function updatePositionSelection(req, res) {
+  const client = await pool.connect()
+
+  try {
+    const { inventarioId } = req.params
+    const { positionIds } = req.body || {}
+
+    if (!Array.isArray(positionIds)) {
+      return res.status(400).json({
+        error: "positionIds deve ser uma lista"
+      })
+    }
+
+    await client.query("BEGIN")
+
+    await client.query(
+      `UPDATE posicoes
+       SET incluida_no_inventario = false
+       WHERE inventario_id = $1`,
+      [inventarioId]
+    )
+
+    if (positionIds.length > 0) {
+      await client.query(
+        `UPDATE posicoes
+         SET incluida_no_inventario = true
+         WHERE inventario_id = $1
+           AND id = ANY($2::int[])`,
+        [inventarioId, positionIds]
+      )
+    }
+
+    await client.query("COMMIT")
+
+    return res.json({
+      message: "Seleção de posições atualizada com sucesso",
+      totalSelecionadas: positionIds.length
+    })
+  } catch (error) {
+    await client.query("ROLLBACK")
+
+    return res.status(500).json({
+      error: "Erro ao atualizar seleção de posições",
+      details: error.message
+    })
+  } finally {
+    client.release()
   }
 }
 
@@ -54,7 +131,7 @@ async function startCounting(req, res) {
         segundo_operador,
         terceiro_operador,
         fase_atual,
-        observacao
+        incluida_no_inventario
        FROM posicoes
        WHERE id = $1`,
       [positionId]
@@ -65,6 +142,13 @@ async function startCounting(req, res) {
     }
 
     const position = positionResult.rows[0]
+
+    if (position.incluida_no_inventario === false) {
+      return res.status(400).json({
+        error: "Esta posição não está incluída neste inventário"
+      })
+    }
+
     const faseAtual = Number(position.fase_atual || 1)
 
     if (
@@ -74,27 +158,6 @@ async function startCounting(req, res) {
     ) {
       return res.status(409).json({
         error: `Posição em uso por ${position.operador_atual}`
-      })
-    }
-
-    if (
-      faseAtual === 2 &&
-      position.primeiro_operador === nomeOperador &&
-      position.status === "recontagem"
-    ) {
-      return res.status(403).json({
-        error: "Este operador já realizou a primeira contagem desta posição"
-      })
-    }
-
-    if (
-      faseAtual === 3 &&
-      (position.primeiro_operador === nomeOperador ||
-        position.segundo_operador === nomeOperador) &&
-      position.status === "recontagem"
-    ) {
-      return res.status(403).json({
-        error: "Este operador já participou das contagens anteriores desta posição"
       })
     }
 
@@ -110,18 +173,7 @@ async function startCounting(req, res) {
          data_inicio = COALESCE(data_inicio, NOW()),
          ${campoOperador} = COALESCE(${campoOperador}, $1)
        WHERE id = $2
-         AND status IN ('pendente', 'recontagem', 'contando')
-       RETURNING
-         id,
-         codigo,
-         status,
-         operador_atual,
-         primeiro_operador,
-         segundo_operador,
-         terceiro_operador,
-         fase_atual,
-         observacao,
-         data_inicio`,
+       RETURNING *`,
       [nomeOperador, positionId]
     )
 
@@ -146,15 +198,7 @@ async function finishCounting(req, res) {
     await client.query("BEGIN")
 
     const positionResult = await client.query(
-      `SELECT
-        id,
-        codigo,
-        status,
-        operador_atual,
-        fase_atual,
-        primeiro_operador,
-        segundo_operador,
-        terceiro_operador
+      `SELECT id, fase_atual
        FROM posicoes
        WHERE id = $1`,
       [positionId]
@@ -202,7 +246,6 @@ async function finishCounting(req, res) {
     )
 
     const unresolvedItems = []
-    const analyzedItems = []
 
     for (const item of itemsResult.rows) {
       const resolution = resolveItemUpToPhase(item, faseAtual)
@@ -222,15 +265,8 @@ async function finishCounting(req, res) {
         ]
       )
 
-      const analyzedItem = {
-        ...item,
-        resolution
-      }
-
-      analyzedItems.push(analyzedItem)
-
       if (!resolution.resolved && faseAtual < 3) {
-        unresolvedItems.push(analyzedItem)
+        unresolvedItems.push(item)
       }
     }
 
@@ -250,47 +286,18 @@ async function finishCounting(req, res) {
          data_fim = NOW(),
          operador_atual = NULL
        WHERE id = $3
-       RETURNING
-         id,
-         codigo,
-         status,
-         operador_atual,
-         primeiro_operador,
-         segundo_operador,
-         terceiro_operador,
-         fase_atual,
-         observacao,
-         data_inicio,
-         data_fim`,
+       RETURNING *`,
       [novoStatus, novaFase, positionId]
     )
 
     await client.query("COMMIT")
 
-    let message = "Posição finalizada sem divergências"
-
-    if (unresolvedItems.length > 0 && faseAtual === 1) {
-      message = "Posição enviada para primeira recontagem"
-    } else if (unresolvedItems.length > 0 && faseAtual === 2) {
-      message = "Posição enviada para segunda recontagem"
-    } else if (faseAtual === 3) {
-      const pendenciasFinais = analyzedItems.filter(
-        (item) => !item.resolution.resolved
-      )
-
-      if (pendenciasFinais.length > 0) {
-        message = "Posição finalizada após terceira contagem, mas ainda sem consenso em alguns itens"
-      } else {
-        message = "Posição finalizada após terceira contagem"
-      }
-    }
-
     return res.json({
-      message,
-      position: updateResult.rows[0],
-      faseAnalisada: faseAtual,
-      totalPendentesParaNovaRecontagem: unresolvedItems.length,
-      pendentesParaNovaRecontagem: unresolvedItems
+      message:
+        novoStatus === "recontagem"
+          ? "Posição enviada para recontagem"
+          : "Posição finalizada",
+      position: updateResult.rows[0]
     })
   } catch (error) {
     await client.query("ROLLBACK")
@@ -335,6 +342,8 @@ async function updatePositionObservation(req, res) {
 
 module.exports = {
   listPositions,
+  listAllPositions,
+  updatePositionSelection,
   startCounting,
   finishCounting,
   updatePositionObservation
