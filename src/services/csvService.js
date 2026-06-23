@@ -1,12 +1,11 @@
 const fs = require("fs")
-const csv = require("csv-parser")
 
 function clean(value) {
   return String(value || "")
     .normalize("NFD")
     .replace(/[\u0300-\u036f]/g, "")
     .replace(/\uFEFF/g, "")
-    .replace(/"/g, "")
+    .replace(/^"|"$/g, "")
     .replace(/\u00A0/g, " ")
     .replace(/\s+/g, " ")
     .trim()
@@ -21,9 +20,13 @@ function normalizeHeader(header) {
     cliente: "cliente",
     deposito: "deposito",
     endereco: "posicao",
+    "tipo de area": "tipo_area",
+    unitizacao: "unitizacao",
+    pack: "pack",
+    classificacao: "classificacao",
     un: "unidade",
     "disp. quantidade": "quantidade",
-    "saldo quantidade": "quantidade",
+    "saldo quantidade": "quantidade_saldo",
     lote: "lote",
     fabricacao: "fabricacao",
     validade: "validade"
@@ -48,51 +51,62 @@ function parseBrazilianNumber(value) {
   return Math.round(number)
 }
 
-function detectSeparator(filePath) {
-  const content = fs.readFileSync(filePath, "utf8")
-  const firstLine = content.split(/\r?\n/)[0] || ""
-
+function detectSeparator(firstLine) {
   const semicolonCount = (firstLine.match(/;/g) || []).length
   const commaCount = (firstLine.match(/,/g) || []).length
 
-  return semicolonCount > commaCount ? ";" : ","
+  return semicolonCount >= commaCount ? ";" : ","
 }
 
-function parseCSV(filePath) {
-  return new Promise((resolve, reject) => {
-    const results = []
-    const separator = detectSeparator(filePath)
+function splitLine(line, separator) {
+  return String(line || "")
+    .split(separator)
+    .map((value) => clean(value))
+}
 
-    fs.createReadStream(filePath)
-      .pipe(
-        csv({
-          separator,
-          mapHeaders: ({ header }) => normalizeHeader(header)
-        })
-      )
-      .on("data", (data) => {
-        const row = {
-          sku: clean(data.sku),
-          descricao: clean(data.descricao),
-          cliente: clean(data.cliente),
-          deposito: clean(data.deposito),
-          posicao: clean(data.posicao),
-          unidade: clean(data.unidade),
-          quantidade: parseBrazilianNumber(data.quantidade),
-          lote: clean(data.lote),
-          fabricacao: clean(data.fabricacao),
-          validade: clean(data.validade)
-        }
+async function parseCSV(filePath) {
+  const content = fs.readFileSync(filePath, "utf8")
 
-        results.push(row)
-      })
-      .on("end", () => {
-        resolve(results)
-      })
-      .on("error", (err) => {
-        reject(err)
-      })
-  })
+  const lines = content
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0)
+
+  if (lines.length <= 1) return []
+
+  const separator = detectSeparator(lines[0])
+  const headers = splitLine(lines[0], separator).map(normalizeHeader)
+
+  const results = []
+
+  for (let index = 1; index < lines.length; index++) {
+    const values = splitLine(lines[index], separator)
+    const data = {}
+
+    headers.forEach((header, headerIndex) => {
+      data[header] = values[headerIndex] || ""
+    })
+
+    const quantidade =
+      data.quantidade !== undefined && data.quantidade !== ""
+        ? data.quantidade
+        : data.quantidade_saldo
+
+    results.push({
+      sku: clean(data.sku),
+      descricao: clean(data.descricao),
+      cliente: clean(data.cliente),
+      deposito: clean(data.deposito),
+      posicao: clean(data.posicao),
+      unidade: clean(data.unidade),
+      quantidade: parseBrazilianNumber(quantidade),
+      lote: clean(data.lote),
+      fabricacao: clean(data.fabricacao),
+      validade: clean(data.validade)
+    })
+  }
+
+  return results
 }
 
 module.exports = { parseCSV }
