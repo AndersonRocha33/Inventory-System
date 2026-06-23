@@ -8,16 +8,23 @@ function normalizeInteger(value) {
   return Math.round(number)
 }
 
+function cleanText(value) {
+  return String(value || "")
+    .replace(/\u00A0/g, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+}
+
 function groupRows(rows) {
   const grouped = new Map()
 
   for (const row of rows) {
-    const posicaoCodigo = String(row.posicao || "").trim()
-    const sku = String(row.sku || "").trim()
-    const descricao = String(row.descricao || "").trim()
+    const posicaoCodigo = cleanText(row.posicao)
+    const sku = cleanText(row.sku)
+    const descricao = cleanText(row.descricao)
     const quantidade = normalizeInteger(row.quantidade)
-    const lote = row.lote ? String(row.lote).trim() : null
-    const validade = row.validade ? String(row.validade).trim() : null
+    const lote = row.lote ? cleanText(row.lote) : null
+    const validade = row.validade ? cleanText(row.validade) : null
 
     if (!posicaoCodigo || !sku || !descricao) continue
 
@@ -40,6 +47,20 @@ function groupRows(rows) {
   return Array.from(grouped.values())
 }
 
+function getUniquePositions(rows) {
+  const positions = new Set()
+
+  for (const row of rows) {
+    const posicao = cleanText(row.posicao)
+
+    if (posicao) {
+      positions.add(posicao)
+    }
+  }
+
+  return Array.from(positions)
+}
+
 async function uploadInventory(req, res) {
   const client = await pool.connect()
 
@@ -47,18 +68,36 @@ async function uploadInventory(req, res) {
     const file = req.file
     const { dataInventario } = req.body || {}
 
-    if (!file) return res.status(400).json({ error: "Arquivo não enviado" })
-    if (!dataInventario) return res.status(400).json({ error: "Data do inventário é obrigatória" })
+    if (!file) {
+      return res.status(400).json({ error: "Arquivo não enviado" })
+    }
+
+    if (!dataInventario) {
+      return res.status(400).json({ error: "Data do inventário é obrigatória" })
+    }
 
     const rows = await parseCSV(file.path)
-    if (!rows.length) return res.status(400).json({ error: "CSV vazio" })
 
+    if (!rows.length) {
+      return res.status(400).json({ error: "CSV vazio" })
+    }
+
+    const uniquePositions = getUniquePositions(rows)
     const groupedRows = groupRows(rows)
+
+    if (!uniquePositions.length) {
+      return res.status(400).json({
+        error: "Nenhuma posição encontrada no CSV"
+      })
+    }
 
     await client.query("BEGIN")
 
-    const cliente = rows[0].cliente || null
-    const deposito = rows[0].deposito || null
+    const firstValidRow =
+      rows.find((row) => cleanText(row.cliente) || cleanText(row.deposito)) || rows[0]
+
+    const cliente = cleanText(firstValidRow.cliente) || null
+    const deposito = cleanText(firstValidRow.deposito) || null
     const nomeInventario = `Inventário ${dataInventario}`
 
     const inventarioResult = await client.query(
@@ -71,27 +110,42 @@ async function uploadInventory(req, res) {
     const inventarioId = inventarioResult.rows[0].id
     const positionsMap = new Map()
 
+    for (const posicao of uniquePositions) {
+      const posicaoResult = await client.query(
+        `INSERT INTO posicoes (inventario_id, codigo, incluida_no_inventario)
+         VALUES ($1, $2, true)
+         ON CONFLICT (inventario_id, codigo)
+         DO UPDATE SET codigo = EXCLUDED.codigo
+         RETURNING id`,
+        [inventarioId, posicao]
+      )
+
+      positionsMap.set(posicao, posicaoResult.rows[0].id)
+    }
+
     for (const row of groupedRows) {
-      let posicaoId = positionsMap.get(row.posicao)
+      const posicaoId = positionsMap.get(row.posicao)
 
-      if (!posicaoId) {
-        const posicaoResult = await client.query(
-          `INSERT INTO posicoes (inventario_id, codigo)
-           VALUES ($1, $2)
-           ON CONFLICT (inventario_id, codigo) DO UPDATE SET codigo = EXCLUDED.codigo
-           RETURNING id`,
-          [inventarioId, row.posicao]
-        )
-
-        posicaoId = posicaoResult.rows[0].id
-        positionsMap.set(row.posicao, posicaoId)
-      }
+      if (!posicaoId) continue
 
       await client.query(
         `INSERT INTO itens (
-          posicao_id, sku, descricao, quantidade_sistema, lote, validade, resolvido
+          posicao_id,
+          sku,
+          descricao,
+          quantidade_sistema,
+          lote,
+          validade,
+          resolvido
         ) VALUES ($1, $2, $3, $4, $5, $6, false)`,
-        [posicaoId, row.sku, row.descricao, row.quantidade, row.lote, row.validade]
+        [
+          posicaoId,
+          row.sku,
+          row.descricao,
+          row.quantidade,
+          row.lote,
+          row.validade
+        ]
       )
     }
 
@@ -103,7 +157,8 @@ async function uploadInventory(req, res) {
       dataInventario,
       totalLinhasOriginais: rows.length,
       totalLinhasConsolidadas: groupedRows.length,
-      totalPosicoes: positionsMap.size
+      totalPosicoesArquivo: uniquePositions.length,
+      totalPosicoesImportadas: positionsMap.size
     })
   } catch (error) {
     await client.query("ROLLBACK")
@@ -113,7 +168,10 @@ async function uploadInventory(req, res) {
       details: error.message
     })
   } finally {
-    if (req.file?.path && fs.existsSync(req.file.path)) fs.unlinkSync(req.file.path)
+    if (req.file?.path && fs.existsSync(req.file.path)) {
+      fs.unlinkSync(req.file.path)
+    }
+
     client.release()
   }
 }
@@ -157,7 +215,8 @@ async function finishInventory(req, res) {
         COUNT(*) FILTER (WHERE status = 'finalizado')::integer AS finalizadas,
         COUNT(*)::integer AS total
       FROM posicoes
-      WHERE inventario_id = $1`,
+      WHERE inventario_id = $1
+        AND COALESCE(incluida_no_inventario, true) = true`,
       [inventarioId]
     )
 
