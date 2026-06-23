@@ -1,35 +1,35 @@
-const csv = require("csv-parser")
 const fs = require("fs")
+const csv = require("csv-parser")
 
-function normalizeText(text) {
-  if (!text) return ""
-
-  return String(text)
+function clean(value) {
+  return String(value || "")
     .normalize("NFD")
     .replace(/[\u0300-\u036f]/g, "")
-    .replace(/"/g, "")
     .replace(/\uFEFF/g, "")
+    .replace(/"/g, "")
+    .replace(/\u00A0/g, " ")
+    .replace(/\s+/g, " ")
     .trim()
 }
 
 function normalizeHeader(header) {
-  const clean = normalizeText(header).toLowerCase()
+  const cleanHeader = clean(header).toLowerCase()
 
   const map = {
     codigo: "sku",
     produto: "descricao",
-    endereco: "posicao",
-    "saldo quantidade": "quantidade",
-    "disp. quantidade": "quantidade",
-    deposito: "deposito",
     cliente: "cliente",
-    lote: "lote",
-    validade: "validade",
+    deposito: "deposito",
+    endereco: "posicao",
     un: "unidade",
-    fabricacao: "fabricacao"
+    "disp. quantidade": "quantidade",
+    "saldo quantidade": "quantidade",
+    lote: "lote",
+    fabricacao: "fabricacao",
+    validade: "validade"
   }
 
-  return map[clean] || clean
+  return map[cleanHeader] || cleanHeader
 }
 
 function parseBrazilianNumber(value) {
@@ -42,7 +42,10 @@ function parseBrazilianNumber(value) {
     .trim()
 
   const number = Number(normalized)
-  return Number.isNaN(number) ? 0 : Math.round(number)
+
+  if (Number.isNaN(number)) return 0
+
+  return Math.round(number)
 }
 
 function detectSeparator(filePath) {
@@ -55,13 +58,6 @@ function detectSeparator(filePath) {
   return semicolonCount > commaCount ? ";" : ","
 }
 
-function clean(value) {
-  return String(value || "")
-    .replace(/\u00A0/g, " ")
-    .replace(/\s+/g, " ")
-    .trim()
-}
-
 function parseCSV(filePath) {
   return new Promise((resolve, reject) => {
     const results = []
@@ -70,26 +66,32 @@ function parseCSV(filePath) {
     fs.createReadStream(filePath)
       .pipe(
         csv({
-          mapHeaders: ({ header }) => normalizeHeader(header),
-          separator
+          separator,
+          mapHeaders: ({ header }) => normalizeHeader(header)
         })
       )
       .on("data", (data) => {
-        results.push({
+        const row = {
           sku: clean(data.sku),
           descricao: clean(data.descricao),
-          posicao: clean(data.posicao),
-          quantidade: parseBrazilianNumber(data.quantidade),
-          deposito: clean(data.deposito),
           cliente: clean(data.cliente),
-          lote: clean(data.lote),
-          validade: clean(data.validade),
+          deposito: clean(data.deposito),
+          posicao: clean(data.posicao),
           unidade: clean(data.unidade),
-          fabricacao: clean(data.fabricacao)
-        })
+          quantidade: parseBrazilianNumber(data.quantidade),
+          lote: clean(data.lote),
+          fabricacao: clean(data.fabricacao),
+          validade: clean(data.validade)
+        }
+
+        results.push(row)
       })
-      .on("end", () => resolve(results))
-      .on("error", (err) => reject(err))
+      .on("end", () => {
+        resolve(results)
+      })
+      .on("error", (err) => {
+        reject(err)
+      })
   })
 }
 

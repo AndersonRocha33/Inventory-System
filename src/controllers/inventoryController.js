@@ -4,7 +4,9 @@ const { parseCSV } = require("../services/csvService")
 
 function normalizeInteger(value) {
   const number = Number(value || 0)
+
   if (Number.isNaN(number)) return 0
+
   return Math.round(number)
 }
 
@@ -13,6 +15,20 @@ function cleanText(value) {
     .replace(/\u00A0/g, " ")
     .replace(/\s+/g, " ")
     .trim()
+}
+
+function getUniquePositions(rows) {
+  const positions = new Set()
+
+  for (const row of rows) {
+    const posicao = cleanText(row.posicao)
+
+    if (posicao) {
+      positions.add(posicao)
+    }
+  }
+
+  return Array.from(positions)
 }
 
 function groupRows(rows) {
@@ -45,20 +61,6 @@ function groupRows(rows) {
   }
 
   return Array.from(grouped.values())
-}
-
-function getUniquePositions(rows) {
-  const positions = new Set()
-
-  for (const row of rows) {
-    const posicao = cleanText(row.posicao)
-
-    if (posicao) {
-      positions.add(posicao)
-    }
-  }
-
-  return Array.from(positions)
 }
 
 async function uploadInventory(req, res) {
@@ -152,16 +154,22 @@ async function uploadInventory(req, res) {
     await client.query("COMMIT")
 
     return res.status(201).json({
-       message: "Inventário importado com sucesso",
-       inventarioId,
-       dataInventario,
-       totalLinhasOriginais: rows.length,
-       totalLinhasConsolidadas: groupedRows.length,
+      message: "Inventário importado com sucesso",
+      inventarioId,
+      dataInventario,
 
-       totalPosicoes: positionsMap.size,
-       totalPosicoesArquivo: uniquePositions.length,
-       totalPosicoesImportadas: positionsMap.size
-})
+      totalLinhasOriginais: rows.length,
+      totalLinhasConsolidadas: groupedRows.length,
+
+      totalPosicoes: positionsMap.size,
+      totalPosicoesArquivo: uniquePositions.length,
+      totalPosicoesImportadas: positionsMap.size,
+
+      diagnostico: {
+        primeirasPosicoes: uniquePositions.slice(0, 10),
+        ultimasPosicoes: uniquePositions.slice(-10)
+      }
+    })
   } catch (error) {
     await client.query("ROLLBACK")
 
