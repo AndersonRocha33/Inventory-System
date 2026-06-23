@@ -8,6 +8,7 @@ function normalizeText(text) {
     .normalize("NFD")
     .replace(/[\u0300-\u036f]/g, "")
     .replace(/"/g, "")
+    .replace(/\uFEFF/g, "")
     .trim()
 }
 
@@ -16,20 +17,16 @@ function normalizeHeader(header) {
 
   const map = {
     codigo: "sku",
-    "código": "sku",
     produto: "descricao",
     endereco: "posicao",
-    endereço: "posicao",
     "saldo quantidade": "quantidade",
     "disp. quantidade": "quantidade",
     deposito: "deposito",
-    depósito: "deposito",
     cliente: "cliente",
     lote: "lote",
     validade: "validade",
     un: "unidade",
-    fabricacao: "fabricacao",
-    fabricação: "fabricacao"
+    fabricacao: "fabricacao"
   }
 
   return map[clean] || clean
@@ -45,10 +42,7 @@ function parseBrazilianNumber(value) {
     .trim()
 
   const number = Number(normalized)
-
-  if (Number.isNaN(number)) return 0
-
-  return Math.round(number)
+  return Number.isNaN(number) ? 0 : Math.round(number)
 }
 
 function detectSeparator(filePath) {
@@ -58,9 +52,14 @@ function detectSeparator(filePath) {
   const semicolonCount = (firstLine.match(/;/g) || []).length
   const commaCount = (firstLine.match(/,/g) || []).length
 
-  if (semicolonCount > commaCount) return ";"
+  return semicolonCount > commaCount ? ";" : ","
+}
 
-  return ","
+function clean(value) {
+  return String(value || "")
+    .replace(/\u00A0/g, " ")
+    .replace(/\s+/g, " ")
+    .trim()
 }
 
 function parseCSV(filePath) {
@@ -76,32 +75,17 @@ function parseCSV(filePath) {
         })
       )
       .on("data", (data) => {
-        const sku = String(data.sku || "").trim()
-        const descricao = String(data.descricao || "").trim()
-        const posicao = String(data.posicao || "").trim()
-
-        const quantidade = parseBrazilianNumber(
-          data.quantidade ||
-            data.quantidade_disponivel ||
-            data.saldo_quantidade ||
-            data.disp_quantidade
-        )
-
-        if (!sku || !descricao || !posicao) {
-          return
-        }
-
         results.push({
-          sku,
-          descricao,
-          posicao,
-          quantidade,
-          deposito: String(data.deposito || "").trim(),
-          cliente: String(data.cliente || "").trim(),
-          lote: String(data.lote || "").trim(),
-          validade: String(data.validade || "").trim(),
-          unidade: String(data.unidade || "").trim(),
-          fabricacao: String(data.fabricacao || "").trim()
+          sku: clean(data.sku),
+          descricao: clean(data.descricao),
+          posicao: clean(data.posicao),
+          quantidade: parseBrazilianNumber(data.quantidade),
+          deposito: clean(data.deposito),
+          cliente: clean(data.cliente),
+          lote: clean(data.lote),
+          validade: clean(data.validade),
+          unidade: clean(data.unidade),
+          fabricacao: clean(data.fabricacao)
         })
       })
       .on("end", () => resolve(results))

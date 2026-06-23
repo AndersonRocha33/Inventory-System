@@ -152,14 +152,16 @@ async function uploadInventory(req, res) {
     await client.query("COMMIT")
 
     return res.status(201).json({
-      message: "Inventário importado com sucesso",
-      inventarioId,
-      dataInventario,
-      totalLinhasOriginais: rows.length,
-      totalLinhasConsolidadas: groupedRows.length,
-      totalPosicoesArquivo: uniquePositions.length,
-      totalPosicoesImportadas: positionsMap.size
-    })
+       message: "Inventário importado com sucesso",
+       inventarioId,
+       dataInventario,
+       totalLinhasOriginais: rows.length,
+       totalLinhasConsolidadas: groupedRows.length,
+
+       totalPosicoes: positionsMap.size,
+       totalPosicoesArquivo: uniquePositions.length,
+       totalPosicoesImportadas: positionsMap.size
+})
   } catch (error) {
     await client.query("ROLLBACK")
 
